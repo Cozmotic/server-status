@@ -113,6 +113,9 @@ async def check_weekly_reset():
             save_punchcard_data()
 
 async def update_server_status():
+    last_reminder_time = {}  # Track last reminder time for each user
+    reminder_cooldown = 300  # 5 minutes cooldown between reminders
+    
     while True:
         s = requests.get(f'https://api.scplist.kr/api/servers/{id2}').text
         data = json.loads(s)
@@ -120,9 +123,32 @@ async def update_server_status():
         player_count = data['players']
         sl_pc = int(player_count.split('/')[0])
         
+        # Update bot status
         if sl_pc == 0:
             await client.change_presence(activity=discord.CustomActivity(name=f"Online: {player_count}"),
                                     status=discord.Status.idle)
+            
+            # Check for punched in users when server is empty
+            current_time = datetime.now()
+            logs_channel = client.get_channel(PUNCHCARD_LOGS_CHANNEL_ID)
+            
+            if logs_channel:
+                for user_id, data in punchcard_data.items():
+                    if data["punched_in"]:
+                        # Check if enough time has passed since last reminder
+                        if (user_id not in last_reminder_time or 
+                            (current_time - last_reminder_time[user_id]).total_seconds() >= reminder_cooldown):
+                            
+                            try:
+                                user = await client.fetch_user(int(user_id))
+                                await logs_channel.send(
+                                    f"⚠️ <@{user_id}> You are currently punched in but the server appears to be empty! "
+                                    f"Please punch out if you're not actively playing."
+                                )
+                                last_reminder_time[user_id] = current_time
+                            except discord.NotFound:
+                                print(f"Could not find user with ID {user_id}")
+                            
         elif sl_pc >= int(player_count.split('/')[1]):
             await client.change_presence(activity=discord.CustomActivity(name=f"Online: {player_count}"),
                                     status=discord.Status.dnd)
