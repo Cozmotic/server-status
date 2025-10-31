@@ -114,7 +114,7 @@ async def check_weekly_reset():
 
 async def update_server_status():
     last_reminder_time = {}  # Track last reminder time for each user
-    reminder_cooldown = 300  # 5 minutes cooldown between reminders
+    reminder_cooldown = 600  # 10 minutes cooldown between reminders
     
     while True:
         s = requests.get(f'https://api.scplist.kr/api/servers/{id2}').text
@@ -141,10 +141,31 @@ async def update_server_status():
                             
                             try:
                                 user = await client.fetch_user(int(user_id))
+                                # Send log message
                                 await logs_channel.send(
-                                    f"⚠️ <@{user_id}> You are currently punched in but the server appears to be empty! "
-                                    f"Please punch out if you're not actively playing."
+                                    f"Logged: {user.display_name} ({user.name}) was punched in while server was empty"
                                 )
+                                
+                                # Try to send DM first
+                                try:
+                                    await user.send(
+                                        "**Reminder:** You are currently punched in but the server appears to be empty! "
+                                        "Please punch out if you're not actively playing."
+                                    )
+                                except discord.Forbidden:
+                                    # If DM fails, send ephemeral message in logs channel
+                                    try:
+                                        message = await logs_channel.send(f"<@{user_id}>")
+                                        await message.delete()  # Delete the ping message immediately
+                                        await logs_channel.send(
+                                            f"You are currently punched in but the server appears to be empty! "
+                                            f"Please punch out if you're not actively playing.",
+                                            ephemeral=True,
+                                            reference=message
+                                        )
+                                    except Exception as e:
+                                        print(f"Failed to send ephemeral message: {e}")
+                                
                                 last_reminder_time[user_id] = current_time
                             except discord.NotFound:
                                 print(f"Could not find user with ID {user_id}")
