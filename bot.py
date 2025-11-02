@@ -16,7 +16,7 @@ client = discord.Client(intents=intents)
 
 # Server status constants
 id2 = "95631"
-refresh = 30
+refresh = 90
 
 # Punchcard constants
 PUNCHCARD_CHANNEL_ID = 1433624015557365800  # Channel for the punchcard button
