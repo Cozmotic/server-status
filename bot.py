@@ -15,7 +15,7 @@ intents.presences = True
 client = discord.Client(intents=intents)
 
 # Server status constants
-id2 = "95338"
+id2 = "95631"
 refresh = 30
 
 # Punchcard constants
@@ -115,67 +115,96 @@ async def check_weekly_reset():
 async def update_server_status():
     last_reminder_time = {}  # Track last reminder time for each user
     reminder_cooldown = 600  # 10 minutes cooldown between reminders
-    
+
+    # empty_pending: set when we see the server go from non-zero -> zero
+    # server_empty_confirmed: set after we observe zero for a second consecutive cycle
+    empty_pending = False
+    server_empty_confirmed = False
+    last_sl_pc = None
+
     while True:
         s = requests.get(f'https://api.scplist.kr/api/servers/{id2}').text
         data = json.loads(s)
 
         player_count = data['players']
         sl_pc = int(player_count.split('/')[0])
-        
+
         # Update bot status
         if sl_pc == 0:
             await client.change_presence(activity=discord.CustomActivity(name=f"Online: {player_count}"),
                                     status=discord.Status.idle)
-            
-            # Check for punched in users when server is empty
-            current_time = datetime.now()
-            logs_channel = client.get_channel(PUNCHCARD_LOGS_CHANNEL_ID)
-            
-            if logs_channel:
-                for user_id, data in punchcard_data.items():
-                    if data["punched_in"]:
-                        # Check if enough time has passed since last reminder
-                        if (user_id not in last_reminder_time or 
-                            (current_time - last_reminder_time[user_id]).total_seconds() >= reminder_cooldown):
-                            
-                            try:
-                                user = await client.fetch_user(int(user_id))
-                                # Send log message
-                                await logs_channel.send(
-                                    f"Logged: {user.display_name} ({user.name}) was punched in while server was empty"
-                                )
-                                
-                                # Try to send DM first
+
+            # Determine empty confirmation state:
+            # - If we just transitioned from non-zero to zero, mark pending and skip notifications this cycle
+            # - If we were already pending and still zero, confirm and send notifications
+            if last_sl_pc is None:
+                # First run: don't immediately notify, wait one cycle to confirm
+                empty_pending = True
+                server_empty_confirmed = False
+            elif last_sl_pc > 0 and sl_pc == 0:
+                empty_pending = True
+                server_empty_confirmed = False
+            elif last_sl_pc == 0 and empty_pending:
+                # Confirmed empty for a second cycle -> allow notifications
+                server_empty_confirmed = True
+                empty_pending = False
+
+            # Only send notifications if the empty state has been confirmed at least once
+            if server_empty_confirmed:
+                current_time = datetime.now()
+                logs_channel = client.get_channel(PUNCHCARD_LOGS_CHANNEL_ID)
+
+                if logs_channel:
+                    for user_id, data in punchcard_data.items():
+                        if data["punched_in"]:
+                            # Check if enough time has passed since last reminder
+                            if (user_id not in last_reminder_time or 
+                                (current_time - last_reminder_time[user_id]).total_seconds() >= reminder_cooldown):
                                 try:
-                                    await user.send(
-                                        "**Reminder:** You are currently punched in but the server appears to be empty! "
-                                        "Please punch out if you're not actively playing."
+                                    user = await client.fetch_user(int(user_id))
+                                    # Send log message (quiet)
+                                    await logs_channel.send(
+                                        f"Logged: {user.display_name} ({user.name}) was punched in while server was empty"
                                     )
-                                except discord.Forbidden:
-                                    # If DM fails, send ephemeral message in logs channel
+
+                                    # Try to send DM first
                                     try:
-                                        message = await logs_channel.send(f"<@{user_id}>")
-                                        await message.delete()  # Delete the ping message immediately
-                                        await logs_channel.send(
-                                            f"You are currently punched in but the server appears to be empty! "
-                                            f"Please punch out if you're not actively playing.",
-                                            ephemeral=True,
-                                            reference=message
+                                        await user.send(
+                                            "**Reminder:** You are currently punched in but the server appears to be empty! "
+                                            "Please punch out if you're not actively playing."
                                         )
-                                    except Exception as e:
-                                        print(f"Failed to send ephemeral message: {e}")
-                                
-                                last_reminder_time[user_id] = current_time
-                            except discord.NotFound:
-                                print(f"Could not find user with ID {user_id}")
-                            
+                                    except discord.Forbidden:
+                                        # If DM fails, attempt a short server-only notify and an ephemeral message
+                                        try:
+                                            # Send a mention and delete it immediately to generate a notification
+                                            ping_msg = await logs_channel.send(f"<@{user_id}>")
+                                            await ping_msg.delete()
+                                            # Fallback ephemeral-like message (note: ephemeral param works on interactions only)
+                                            await logs_channel.send(
+                                                f"You are currently punched in but the server appears to be empty! "
+                                                f"Please punch out if you're not actively playing."
+                                            )
+                                        except Exception as e:
+                                            print(f"Failed fallback notify for user {user_id}: {e}")
+
+                                    last_reminder_time[user_id] = current_time
+                                except discord.NotFound:
+                                    print(f"Could not find user with ID {user_id}")
+
         elif sl_pc >= int(player_count.split('/')[1]):
             await client.change_presence(activity=discord.CustomActivity(name=f"Online: {player_count}"),
                                     status=discord.Status.dnd)
+            # Reset empty state flags when players are present
+            empty_pending = False
+            server_empty_confirmed = False
         else:
             await client.change_presence(activity=discord.CustomActivity(name=f"Online: {player_count}"),
                                     status=discord.Status.online)
+            # If there are some players but not full, treat as non-empty
+            empty_pending = False
+            server_empty_confirmed = False
+
+        last_sl_pc = sl_pc
 
         await asyncio.sleep(refresh)
 
