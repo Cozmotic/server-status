@@ -60,7 +60,7 @@ class PunchcardButton(discord.ui.Button):
                 "last_punch": current_time.isoformat(),
                 "total_time": 0
             }
-            await interaction.response.send_message(f"{interaction.user.mention} punched in!", ephemeral=True)
+            await interaction.response.send_message(f"{interaction.user.mention} punched in.", ephemeral=True)
             if logs_channel:
                 await logs_channel.send(f"**Punch In:** {interaction.user.display_name} ({interaction.user.name})")
         else:
@@ -73,7 +73,7 @@ class PunchcardButton(discord.ui.Button):
                 user_data["punched_in"] = False
                 session_time = timedelta(seconds=int(time_diff))
                 await interaction.response.send_message(
-                    f"{interaction.user.mention} punched out! Session time: {session_time}",
+                    f"{interaction.user.mention} punched out. Session time: {session_time}",
                     ephemeral=True
                 )
                 if logs_channel:
@@ -85,7 +85,7 @@ class PunchcardButton(discord.ui.Button):
                 # Punch in
                 user_data["punched_in"] = True
                 user_data["last_punch"] = current_time.isoformat()
-                await interaction.response.send_message(f"{interaction.user.mention} punched in!", ephemeral=True)
+                await interaction.response.send_message(f"{interaction.user.mention} punched in.", ephemeral=True)
                 if logs_channel:
                     await logs_channel.send(f"**Punch In:** {interaction.user.display_name} ({interaction.user.name})")
 
@@ -164,13 +164,13 @@ async def update_server_status():
                                     user = await client.fetch_user(int(user_id))
                                     # Send log message (quiet)
                                     await logs_channel.send(
-                                        f"Logged: {user.display_name} ({user.name}) was punched in while server was empty"
+                                        f"Logged: {user.display_name} ({user.name}) was punched in while server was empty."
                                     )
 
                                     # Try to send DM first
                                     try:
                                         await user.send(
-                                            "**Reminder:** You are currently punched in but the server appears to be empty! "
+                                            "**Reminder:** You are currently punched in but the server appears to be empty. "
                                             "Please punch out if you're not actively playing."
                                         )
                                     except discord.Forbidden:
@@ -181,7 +181,7 @@ async def update_server_status():
                                             await ping_msg.delete()
                                             # Fallback ephemeral-like message (note: ephemeral param works on interactions only)
                                             await logs_channel.send(
-                                                f"You are currently punched in but the server appears to be empty! "
+                                                f"You are currently punched in but the server appears to be empty. "
                                                 f"Please punch out if you're not actively playing."
                                             )
                                         except Exception as e:
@@ -211,7 +211,7 @@ async def update_server_status():
 @client.event
 async def on_ready():
     global punchcard_data
-    print(f"{client.user} is now online!")
+    print(f"{client.user} is now online")
     
     # Load existing punchcard data
     punchcard_data = load_punchcard_data()
@@ -229,7 +229,7 @@ async def on_ready():
         # Create new punchcard message with button
         view = View(timeout=None)
         view.add_item(PunchcardButton())
-        await channel.send("Click the button below to punch in/out:", view=view)
+        await channel.send("Click the button below to punch in/out\nIf you miss a punch, contact an O5-Council member", view=view)
 
     # Start server status update loop
     asyncio.create_task(update_server_status())
