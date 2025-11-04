@@ -32,8 +32,8 @@ PUNCHCARD_FILE = "punchcard_data.json"
 punchcard_data = {}
 
 # LFG feature constants
-LFG_CHANNEL_ID = 1435290475971088614  # Channel where LFG pings should be posted (replace)
-LFG_ROLE_ID = 1435291149911982142  # Role to mention for LFG (replace)
+LFG_CHANNEL_ID = 1419213517260853350  # Channel where LFG pings should be posted (replace)
+LFG_ROLE_ID = 1419213574206918656  # Role to mention for LFG (replace)
 LFG_COOLDOWN_MINUTES = 60  # default per-user cooldown in minutes
 
 # Runtime LFG state
