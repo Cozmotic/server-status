@@ -2,17 +2,19 @@ import asyncio
 import json
 from datetime import datetime, timedelta
 import discord
+from discord.ext import commands, tasks
 from discord.ui import View
-from discord.ext import tasks
 import requests
 import os
 
-# Initialize Discord client with required intents
+# Initialize Bot with required intents
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.presences = True
-client = discord.Client(intents=intents)
+
+# Switch to using Bot instead of Client
+client = commands.Bot(command_prefix="!", intents=intents)
 
 # Server status constants
 id2 = "95631"
@@ -28,6 +30,19 @@ PUNCHCARD_FILE = "punchcard_data.json"
 
 # Data structure
 punchcard_data = {}
+
+# LFG feature constants
+LFG_CHANNEL_ID = 1435290475971088614  # Channel where LFG pings should be posted (replace)
+LFG_ROLE_ID = 1435291149911982142  # Role to mention for LFG (replace)
+LFG_COOLDOWN_MINUTES = 60  # default per-user cooldown in minutes
+
+# Runtime LFG state
+lfg_posts = {}  # user_id -> {"channel_id": int, "message_id": int}
+# Global timestamp of the last /lfg (global cooldown, not per-user)
+last_lfg_time = None  # datetime of last /lfg
+
+# Current server player_count string (updated by update_server_status)
+current_player_count = "0/0"
 
 TOKEN = os.getenv("THEATORS_BOT_TOKEN")
 
@@ -100,7 +115,7 @@ async def check_weekly_reset():
         channel = client.get_channel(PUNCHCARD_LOGS_CHANNEL_ID)
         if channel:
             # Generate report
-            report = "**Weekly Punchcard Report**\n━━━━━━━━━━━━━━━━━━\n"
+            report = "**Weekly Punchcard Report**\n━━━━━━━━━━━━━━━━━━━━━\n"
             for user_id, data in punchcard_data.items():
                 user = await client.fetch_user(int(user_id))
                 total_hours = data["total_time"] / 3600
@@ -111,6 +126,45 @@ async def check_weekly_reset():
             # Reset data
             punchcard_data.clear()
             save_punchcard_data()
+
+
+@client.tree.command(name="lfg", description="Post an LFG ping in the LFG channel (cooldown applies)")
+async def lfg(interaction: discord.Interaction):
+    """Post an LFG ping mentioning the configured role. Optional `minutes` sets cooldown for this post (overrides default for this call)."""
+    user_id = str(interaction.user.id)
+    now = datetime.now()
+    cooldown = LFG_COOLDOWN_MINUTES
+
+    # Check global cooldown
+    global last_lfg_time
+    last = last_lfg_time
+    if last is not None:
+        elapsed = (now - last).total_seconds() / 60.0
+        if elapsed < cooldown:
+            remaining = int(cooldown - elapsed + 0.5)
+            await interaction.response.send_message(f"The LFG command is on global cooldown. Please wait {remaining} more minute(s) before posting another LFG.", ephemeral=True)
+            return
+
+    # Post in the designated LFG channel
+    channel = client.get_channel(LFG_CHANNEL_ID)
+    if channel is None:
+        await interaction.response.send_message("LFG channel is not configured or the bot cannot access it.", ephemeral=True)
+        return
+
+    # Build message content and send (do not delete messages in this channel)
+    content = f"<@&{LFG_ROLE_ID}> (Posted by {interaction.user.mention})\nPlayer Count: {current_player_count}"
+    try:
+        msg = await channel.send(content)
+    except Exception as e:
+        await interaction.response.send_message(f"Failed to post LFG message: {e}", ephemeral=True)
+        return
+
+    # Track the posted message so we can update it on player count changes
+    lfg_posts[user_id] = {"channel_id": channel.id, "message_id": msg.id}
+    # set global last lfg time
+    last_lfg_time = now
+
+    await interaction.response.send_message(f"Posted LFG in {channel.mention}. It will be updated with player count changes.", ephemeral=True)
 
 async def update_server_status():
     last_reminder_time = {}  # Track last reminder time for each user
@@ -128,11 +182,14 @@ async def update_server_status():
 
         player_count = data['players']
         sl_pc = int(player_count.split('/')[0])
+        # update global current player_count used by LFG messages
+        global current_player_count
+        current_player_count = player_count
 
         # Update bot status
         if sl_pc == 0:
             await client.change_presence(activity=discord.CustomActivity(name=f"Online: {player_count}"),
-                                    status=discord.Status.idle)
+                                        status=discord.Status.idle)
 
             # Determine empty confirmation state:
             # - If we just transitioned from non-zero to zero, mark pending and skip notifications this cycle
@@ -164,13 +221,13 @@ async def update_server_status():
                                     user = await client.fetch_user(int(user_id))
                                     # Send log message (quiet)
                                     await logs_channel.send(
-                                        f"Logged: {user.display_name} ({user.name}) was punched in while server was empty."
+                                        f"Logged: {user.display_name} ({user.name}) was punched in while server was empty"
                                     )
 
                                     # Try to send DM first
                                     try:
                                         await user.send(
-                                            "**Reminder:** You are currently punched in but the server appears to be empty. "
+                                            "**Reminder:** You are currently punched in but the server appears to be empty! "
                                             "Please punch out if you're not actively playing."
                                         )
                                     except discord.Forbidden:
@@ -181,7 +238,7 @@ async def update_server_status():
                                             await ping_msg.delete()
                                             # Fallback ephemeral-like message (note: ephemeral param works on interactions only)
                                             await logs_channel.send(
-                                                f"You are currently punched in but the server appears to be empty. "
+                                                f"You are currently punched in but the server appears to be empty! "
                                                 f"Please punch out if you're not actively playing."
                                             )
                                         except Exception as e:
@@ -190,6 +247,25 @@ async def update_server_status():
                                     last_reminder_time[user_id] = current_time
                                 except discord.NotFound:
                                     print(f"Could not find user with ID {user_id}")
+
+                # Update any active LFG posts with the new player count
+                if lfg_posts:
+                    for uid, info in list(lfg_posts.items()):
+                        try:
+                            channel = client.get_channel(info.get("channel_id"))
+                            if channel is None:
+                                continue
+                            try:
+                                msg = await channel.fetch_message(info.get("message_id"))
+                            except discord.NotFound:
+                                # message was deleted — remove tracking
+                                lfg_posts.pop(uid, None)
+                                continue
+
+                            new_content = f"<@&{LFG_ROLE_ID}> (Posted by <@{uid}>)\nPlayer Count: {current_player_count}"
+                            await msg.edit(content=new_content)
+                        except Exception as e:
+                            print(f"Failed to update LFG message for {uid}: {e}")
 
         elif sl_pc >= int(player_count.split('/')[1]):
             await client.change_presence(activity=discord.CustomActivity(name=f"Online: {player_count}"),
@@ -210,6 +286,13 @@ async def update_server_status():
 
 @client.event
 async def on_ready():
+    # Sync the application commands
+    try:
+        await client.tree.sync()  # This syncs the commands with Discord
+        print("Slash commands synced!")
+    except Exception as e:
+        print(f"Failed to sync application commands: {e}")
+
     global punchcard_data
     print(f"{client.user} is now online")
     
@@ -233,6 +316,11 @@ async def on_ready():
 
     # Start server status update loop
     asyncio.create_task(update_server_status())
+    # Sync application (slash) commands
+    try:
+        await client.tree.sync()
+    except Exception as e:
+        print(f"Failed to sync application commands: {e}")
 
+# Run the bot
 client.run(TOKEN)
-
