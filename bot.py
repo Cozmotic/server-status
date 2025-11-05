@@ -177,8 +177,28 @@ async def update_server_status():
     last_sl_pc = None
 
     while True:
-        s = requests.get(f'https://api.scplist.kr/api/servers/{id2}').text
-        data = json.loads(s)
+        url = f'https://api.scplist.kr/api/servers/{id2}'
+        resp = requests.get(url)
+
+        if resp.status_code != 200:
+            print(f"API ERROR: HTTP {resp.status_code}")
+            await asyncio.sleep(refresh)
+            continue
+
+        raw = resp.text.strip()
+
+        if not raw:
+            print("API ERROR: Empty response from server API")
+            await asyncio.sleep(refresh)
+            continue
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            print("API ERROR: Invalid JSON:", raw[:200])
+            await asyncio.sleep(refresh)
+            continue
+
 
         player_count = data['players']
         sl_pc = int(player_count.split('/')[0])
