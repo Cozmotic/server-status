@@ -170,11 +170,10 @@ async def update_server_status():
     last_reminder_time = {}  # Track last reminder time for each user
     reminder_cooldown = 600  # 10 minutes cooldown between reminders
 
-    # empty_pending: set when we see the server go from non-zero -> zero
-    # server_empty_confirmed: set after we observe zero for a second consecutive cycle
     empty_pending = False
     server_empty_confirmed = False
     last_sl_pc = None
+    last_player_count = None  # Track last seen player count to avoid redundant updates
 
     while True:
         url = f'https://api.scplist.kr/api/servers/{id2}'
@@ -199,34 +198,31 @@ async def update_server_status():
             await asyncio.sleep(refresh)
             continue
 
-
         player_count = data['players']
         sl_pc = int(player_count.split('/')[0])
-        # update global current player_count used by LFG messages
+        max_pc = int(player_count.split('/')[1])
+
         global current_player_count
         current_player_count = player_count
 
-        # Update bot status
+        # Update bot presence
         if sl_pc == 0:
-            await client.change_presence(activity=discord.CustomActivity(name=f"Online: {player_count}"),
-                                        status=discord.Status.idle)
+            await client.change_presence(
+                activity=discord.CustomActivity(name=f"Online: {player_count}"),
+                status=discord.Status.idle
+            )
 
-            # Determine empty confirmation state:
-            # - If we just transitioned from non-zero to zero, mark pending and skip notifications this cycle
-            # - If we were already pending and still zero, confirm and send notifications
             if last_sl_pc is None:
-                # First run: don't immediately notify, wait one cycle to confirm
                 empty_pending = True
                 server_empty_confirmed = False
             elif last_sl_pc > 0 and sl_pc == 0:
                 empty_pending = True
                 server_empty_confirmed = False
             elif last_sl_pc == 0 and empty_pending:
-                # Confirmed empty for a second cycle -> allow notifications
                 server_empty_confirmed = True
                 empty_pending = False
 
-            # Only send notifications if the empty state has been confirmed at least once
+            # If confirmed empty, notify punched-in users
             if server_empty_confirmed:
                 current_time = datetime.now()
                 logs_channel = client.get_channel(PUNCHCARD_LOGS_CHANNEL_ID)
@@ -234,29 +230,25 @@ async def update_server_status():
                 if logs_channel:
                     for user_id, data in punchcard_data.items():
                         if data["punched_in"]:
-                            # Check if enough time has passed since last reminder
-                            if (user_id not in last_reminder_time or 
-                                (current_time - last_reminder_time[user_id]).total_seconds() >= reminder_cooldown):
+                            if (
+                                user_id not in last_reminder_time or
+                                (current_time - last_reminder_time[user_id]).total_seconds() >= reminder_cooldown
+                            ):
                                 try:
                                     user = await client.fetch_user(int(user_id))
-                                    # Send log message (quiet)
                                     await logs_channel.send(
                                         f"Logged: {user.display_name} ({user.name}) was punched in while server was empty"
                                     )
 
-                                    # Try to send DM first
                                     try:
                                         await user.send(
                                             "**Reminder:** You are currently punched in but the server appears to be empty! "
                                             "Please punch out if you're not actively playing."
                                         )
                                     except discord.Forbidden:
-                                        # If DM fails, attempt a short server-only notify and an ephemeral message
                                         try:
-                                            # Send a mention and delete it immediately to generate a notification
                                             ping_msg = await logs_channel.send(f"<@{user_id}>")
                                             await ping_msg.delete()
-                                            # Fallback ephemeral-like message (note: ephemeral param works on interactions only)
                                             await logs_channel.send(
                                                 f"You are currently punched in but the server appears to be empty! "
                                                 f"Please punch out if you're not actively playing."
@@ -268,40 +260,49 @@ async def update_server_status():
                                 except discord.NotFound:
                                     print(f"Could not find user with ID {user_id}")
 
-                # Update any active LFG posts with the new player count
-                if lfg_posts:
-                    for uid, info in list(lfg_posts.items()):
-                        try:
-                            channel = client.get_channel(info.get("channel_id"))
-                            if channel is None:
-                                continue
-                            try:
-                                msg = await channel.fetch_message(info.get("message_id"))
-                            except discord.NotFound:
-                                # message was deleted — remove tracking
-                                lfg_posts.pop(uid, None)
-                                continue
-
-                            new_content = f"<@&{LFG_ROLE_ID}> (Posted by <@{uid}>)\nPlayer Count: {current_player_count}"
-                            await msg.edit(content=new_content)
-                        except Exception as e:
-                            print(f"Failed to update LFG message for {uid}: {e}")
-
-        elif sl_pc >= int(player_count.split('/')[1]):
-            await client.change_presence(activity=discord.CustomActivity(name=f"Online: {player_count}"),
-                                    status=discord.Status.dnd)
-            # Reset empty state flags when players are present
+        elif sl_pc >= max_pc:
+            await client.change_presence(
+                activity=discord.CustomActivity(name=f"Online: {player_count}"),
+                status=discord.Status.dnd
+            )
             empty_pending = False
             server_empty_confirmed = False
+
         else:
-            await client.change_presence(activity=discord.CustomActivity(name=f"Online: {player_count}"),
-                                    status=discord.Status.online)
-            # If there are some players but not full, treat as non-empty
+            await client.change_presence(
+                activity=discord.CustomActivity(name=f"Online: {player_count}"),
+                status=discord.Status.online
+            )
             empty_pending = False
             server_empty_confirmed = False
+
+        # ✅ Always update LFG posts when the player count changes
+        if player_count != last_player_count:
+            last_player_count = player_count
+
+            if lfg_posts:
+                for uid, info in list(lfg_posts.items()):
+                    try:
+                        channel = client.get_channel(info.get("channel_id"))
+                        if channel is None:
+                            continue
+                        try:
+                            msg = await channel.fetch_message(info.get("message_id"))
+                        except discord.NotFound:
+                            # message deleted — remove tracking
+                            lfg_posts.pop(uid, None)
+                            continue
+
+                        new_content = (
+                            f"<@&{LFG_ROLE_ID}> (Posted by <@{uid}>)\n"
+                            f"Player Count: {current_player_count}"
+                        )
+                        await msg.edit(content=new_content)
+
+                    except Exception as e:
+                        print(f"Failed to update LFG message for {uid}: {e}")
 
         last_sl_pc = sl_pc
-
         await asyncio.sleep(refresh)
 
 @client.event
