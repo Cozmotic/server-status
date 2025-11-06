@@ -24,7 +24,7 @@ refresh = 90
 PUNCHCARD_CHANNEL_ID = 1433624015557365800  # Channel for the punchcard button
 PUNCHCARD_LOGS_CHANNEL_ID = 1433621369970495589  # Channel for logs and reports (Replace with your channel ID)
 RESET_DAY = 0  # Monday = 0, Sunday = 6
-RESET_HOUR = 5  # 24-hour format (0-23)
+RESET_HOUR = 10  # 24-hour format (0-23)
 RESET_MINUTE = 0  # Minute (0-59)
 PUNCHCARD_FILE = "punchcard_data.json"
 
