@@ -31,6 +31,9 @@ PUNCHCARD_FILE = "punchcard_data.json"
 # Data structure
 punchcard_data = {}
 
+# Toggle punchcard functionality. Set to False to disable all punchcard features.
+PUNCHCARD_ENABLED = False
+
 # LFG feature constants
 LFG_CHANNEL_ID = 1419213517260853350  # Channel where LFG pings should be posted (replace)
 LFG_ROLE_ID = 1419213574206918656  # Role to mention for LFG (replace)
@@ -47,12 +50,16 @@ current_player_count = "0/0"
 TOKEN = os.getenv("THEATORS_BOT_TOKEN")
 
 def load_punchcard_data():
+    if not PUNCHCARD_ENABLED:
+        return {}
     if os.path.exists(PUNCHCARD_FILE):
         with open(PUNCHCARD_FILE, 'r') as f:
             return json.load(f)
     return {}
 
 def save_punchcard_data():
+    if not PUNCHCARD_ENABLED:
+        return
     with open(PUNCHCARD_FILE, 'w') as f:
         json.dump(punchcard_data, f, indent=4)
 
@@ -65,6 +72,10 @@ class PunchcardButton(discord.ui.Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        if not PUNCHCARD_ENABLED:
+            await interaction.response.send_message("Punchcard functionality is disabled.", ephemeral=True)
+            return
+
         user_id = str(interaction.user.id)
         current_time = datetime.now()
         logs_channel = interaction.client.get_channel(PUNCHCARD_LOGS_CHANNEL_ID)
@@ -108,6 +119,9 @@ class PunchcardButton(discord.ui.Button):
 
 @tasks.loop(minutes=1)
 async def check_weekly_reset():
+    if not PUNCHCARD_ENABLED:
+        return
+
     current_time = datetime.now()
     if (current_time.weekday() == RESET_DAY and 
         current_time.hour == RESET_HOUR and 
@@ -222,8 +236,8 @@ async def update_server_status():
                 server_empty_confirmed = True
                 empty_pending = False
 
-            # If confirmed empty, notify punched-in users
-            if server_empty_confirmed:
+            # If confirmed empty, notify punched-in users (only if punchcard enabled)
+            if server_empty_confirmed and PUNCHCARD_ENABLED:
                 current_time = datetime.now()
                 logs_channel = client.get_channel(PUNCHCARD_LOGS_CHANNEL_ID)
 
@@ -317,23 +331,25 @@ async def on_ready():
     global punchcard_data
     print(f"{client.user} is now online")
     
-    # Load existing punchcard data
-    punchcard_data = load_punchcard_data()
-    
-    # Start the weekly reset check
-    check_weekly_reset.start()
-    
-    # Create the punchcard message
-    channel = client.get_channel(PUNCHCARD_CHANNEL_ID)
-    if channel:
-        # Clear existing messages in the channel
-        async for message in channel.history(limit=100):
-            await message.delete()
-        
-        # Create new punchcard message with button
-        view = View(timeout=None)
-        view.add_item(PunchcardButton())
-        await channel.send("Click the button below to punch in/out\nIf you miss a punch, contact an O5-Council member", view=view)
+    # Load existing punchcard data and start punchcard features if enabled
+    if PUNCHCARD_ENABLED:
+        punchcard_data = load_punchcard_data()
+        # Start the weekly reset check
+        check_weekly_reset.start()
+
+        # Create the punchcard message
+        channel = client.get_channel(PUNCHCARD_CHANNEL_ID)
+        if channel:
+            # Clear existing messages in the channel
+            async for message in channel.history(limit=100):
+                await message.delete()
+
+            # Create new punchcard message with button
+            view = View(timeout=None)
+            view.add_item(PunchcardButton())
+            await channel.send("Click the button below to punch in/out\nIf you miss a punch, contact an O5-Council member", view=view)
+    else:
+        punchcard_data = {}
 
     # Start server status update loop
     asyncio.create_task(update_server_status())
