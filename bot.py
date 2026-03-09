@@ -186,7 +186,7 @@ async def lfg(interaction: discord.Interaction):
 
     await interaction.response.send_message(f"Posted LFG in {channel.mention}. It will be updated with player count changes.", ephemeral=True)
 
-@client.tree.command(name="mc_lfg", description="Post a Minecraft LFG ping in the LFG channel (cooldown applies)")
+@client.tree.command(name="minecraft", description="Post a Minecraft LFG ping in the LFG channel (separate cooldown applies)")
 async def mc_lfg(interaction: discord.Interaction):
     """Post a Minecraft LFG ping mentioning the configured role. Optional `minutes` sets cooldown for this post (overrides default for this call)."""
     if not MC_LFG_ENABLED:
@@ -214,7 +214,7 @@ async def mc_lfg(interaction: discord.Interaction):
         return
 
     # Build message content and send (do not delete messages in this channel)
-    content = f"<@&{MC_LFG_ROLE_ID}> (Posted by {interaction.user.mention})\nPlayer Count: {current_player_count}"
+    content = f"<@&{MC_LFG_ROLE_ID}> (Posted by {interaction.user.mention})"
     try:
         msg = await channel.send(content)
     except Exception as e:
