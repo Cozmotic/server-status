@@ -34,15 +34,21 @@ punchcard_data = {}
 # Toggle punchcard functionality. Set to False to disable all punchcard features.
 PUNCHCARD_ENABLED = False
 
+# Toggle Minecraft LFG functionality. Set to False to disable Minecraft LFG features.
+MC_LFG_ENABLED = True
+
 # LFG feature constants
 LFG_CHANNEL_ID = 1419213517260853350  # Channel where LFG pings should be posted (replace)
 LFG_ROLE_ID = 1419213574206918656  # Role to mention for LFG (replace)
+MC_LFG_ROLE_ID = 1479916696226758707
 LFG_COOLDOWN_MINUTES = 60  # default per-user cooldown in minutes
+MC_LFG_COOLDOWN_MINUTES = 60
 
 # Runtime LFG state
 lfg_posts = {}  # user_id -> {"channel_id": int, "message_id": int}
 # Global timestamp of the last /lfg (global cooldown, not per-user)
 last_lfg_time = None  # datetime of last /lfg
+last_mc_lfg_time = None  # datetime of last /mc_lfg
 
 # Current server player_count string (updated by update_server_status)
 current_player_count = "0/0"
@@ -179,6 +185,48 @@ async def lfg(interaction: discord.Interaction):
     last_lfg_time = now
 
     await interaction.response.send_message(f"Posted LFG in {channel.mention}. It will be updated with player count changes.", ephemeral=True)
+
+@client.tree.command(name="mc_lfg", description="Post a Minecraft LFG ping in the LFG channel (cooldown applies)")
+async def mc_lfg(interaction: discord.Interaction):
+    """Post a Minecraft LFG ping mentioning the configured role. Optional `minutes` sets cooldown for this post (overrides default for this call)."""
+    if not MC_LFG_ENABLED:
+        await interaction.response.send_message("Minecraft LFG functionality is disabled.", ephemeral=True)
+        return
+
+    user_id = str(interaction.user.id)
+    now = datetime.now()
+    cooldown = MC_LFG_COOLDOWN_MINUTES
+
+    # Check global cooldown
+    global last_mc_lfg_time
+    last = last_mc_lfg_time
+    if last is not None:
+        elapsed = (now - last).total_seconds() / 60.0
+        if elapsed < cooldown:
+            remaining = int(cooldown - elapsed + 0.5)
+            await interaction.response.send_message(f"The Minecraft LFG command is on global cooldown. Please wait {remaining} more minute(s) before posting another Minecraft LFG.", ephemeral=True)
+            return
+
+    # Post in the designated LFG channel
+    channel = client.get_channel(LFG_CHANNEL_ID)
+    if channel is None:
+        await interaction.response.send_message("LFG channel is not configured or the bot cannot access it.", ephemeral=True)
+        return
+
+    # Build message content and send (do not delete messages in this channel)
+    content = f"<@&{MC_LFG_ROLE_ID}> (Posted by {interaction.user.mention})\nPlayer Count: {current_player_count}"
+    try:
+        msg = await channel.send(content)
+    except Exception as e:
+        await interaction.response.send_message(f"Failed to post Minecraft LFG message: {e}", ephemeral=True)
+        return
+
+    # Track the posted message so we can update it on player count changes
+    lfg_posts[user_id] = {"channel_id": channel.id, "message_id": msg.id}
+    # set global last mc_lfg time
+    last_mc_lfg_time = now
+
+    await interaction.response.send_message(f"Posted Minecraft LFG in {channel.mention}. It will be updated with player count changes.", ephemeral=True)
 
 async def update_server_status():
     last_reminder_time = {}  # Track last reminder time for each user
