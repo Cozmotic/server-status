@@ -45,10 +45,9 @@ LFG_COOLDOWN_MINUTES = 60  # default per-user cooldown in minutes
 MC_LFG_COOLDOWN_MINUTES = 60
 
 # Runtime LFG state
-lfg_posts = {}  # user_id -> {"channel_id": int, "message_id": int}
-# Global timestamp of the last /lfg (global cooldown, not per-user)
-last_lfg_time = None  # datetime of last /lfg
-last_mc_lfg_time = None  # datetime of last /mc_lfg
+lfg_posts = {}  # user_id -> {"channel_id": int, "message_id": int, "type": "lfg" or "minecraft"}
+# Global timestamp of the last LFG command (both /lfg and /minecraft share this cooldown)
+last_lfg_time = None  # datetime of last /lfg or /minecraft
 
 # Current server player_count string (updated by update_server_status)
 current_player_count = "0/0"
@@ -180,31 +179,31 @@ async def lfg(interaction: discord.Interaction):
         return
 
     # Track the posted message so we can update it on player count changes
-    lfg_posts[user_id] = {"channel_id": channel.id, "message_id": msg.id}
+    lfg_posts[user_id] = {"channel_id": channel.id, "message_id": msg.id, "type": "lfg"}
     # set global last lfg time
     last_lfg_time = now
 
     await interaction.response.send_message(f"Posted LFG in {channel.mention}. It will be updated with player count changes.", ephemeral=True)
 
-@client.tree.command(name="minecraft", description="Post a Minecraft LFG ping in the LFG channel (separate cooldown applies)")
+@client.tree.command(name="minecraft", description="Post a Minecraft LFG ping in the LFG channel (same cooldown as /lfg)")
 async def mc_lfg(interaction: discord.Interaction):
-    """Post a Minecraft LFG ping mentioning the configured role. Optional `minutes` sets cooldown for this post (overrides default for this call)."""
+    """Post a Minecraft LFG ping mentioning the configured role. Shares cooldown with /lfg."""
     if not MC_LFG_ENABLED:
         await interaction.response.send_message("Minecraft LFG functionality is disabled.", ephemeral=True)
         return
 
     user_id = str(interaction.user.id)
     now = datetime.now()
-    cooldown = MC_LFG_COOLDOWN_MINUTES
+    cooldown = LFG_COOLDOWN_MINUTES
 
-    # Check global cooldown
-    global last_mc_lfg_time
-    last = last_mc_lfg_time
+    # Check global cooldown (shared with /lfg)
+    global last_lfg_time
+    last = last_lfg_time
     if last is not None:
         elapsed = (now - last).total_seconds() / 60.0
         if elapsed < cooldown:
             remaining = int(cooldown - elapsed + 0.5)
-            await interaction.response.send_message(f"The Minecraft LFG command is on global cooldown. Please wait {remaining} more minute(s) before posting another Minecraft LFG.", ephemeral=True)
+            await interaction.response.send_message(f"An LFG command is on global cooldown. Please wait {remaining} more minute(s) before posting another LFG.", ephemeral=True)
             return
 
     # Post in the designated LFG channel
@@ -222,9 +221,9 @@ async def mc_lfg(interaction: discord.Interaction):
         return
 
     # Track the posted message so we can update it on player count changes
-    lfg_posts[user_id] = {"channel_id": channel.id, "message_id": msg.id}
-    # set global last mc_lfg time
-    last_mc_lfg_time = now
+    lfg_posts[user_id] = {"channel_id": channel.id, "message_id": msg.id, "type": "minecraft"}
+    # set global last lfg time (shared with /lfg)
+    last_lfg_time = now
 
     await interaction.response.send_message(f"Posted Minecraft LFG in {channel.mention}. It will be updated with player count changes.", ephemeral=True)
 
@@ -355,10 +354,15 @@ async def update_server_status():
                             lfg_posts.pop(uid, None)
                             continue
 
-                        new_content = (
-                            f"<@&{LFG_ROLE_ID}> (Posted by <@{uid}>)\n"
-                            f"Player Count: {current_player_count}"
-                        )
+                        msg_type = info.get("type", "lfg")
+
+                        if msg_type == "minecraft":
+                            new_content = f"<@&{MC_LFG_ROLE_ID}> (Posted by <@{uid}>)"
+                        else:
+                            new_content = (
+                                f"<@&{LFG_ROLE_ID}> (Posted by <@{uid}>)\n"
+                                f"Player Count: {current_player_count}"
+                            )
                         await msg.edit(content=new_content)
 
                     except Exception as e:
