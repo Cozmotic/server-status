@@ -11,3 +11,5 @@ venv/
 Thumbs.db
 
 punchcard_data.json
+
+player_log.json
