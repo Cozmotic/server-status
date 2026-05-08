@@ -7,240 +7,185 @@ from discord.ui import View
 import requests
 import os
 
-# Initialize Bot with required intents
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.presences = True
 
-client = commands.Bot(command_prefix="!", intents=intents)
+# Shared state for all bots
+player_counts = {}
 
-# Server status constants
-id2 = "95631"
-refresh = 90
 
-# ✅ NEW: Player logging
-PLAYER_LOG_FILE = "player_log.json"
-MAX_LOG_ENTRIES = 10000
-
-def log_player_count(player_count):
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "player_count": player_count
-    }
-
-    if os.path.exists(PLAYER_LOG_FILE):
-        try:
-            with open(PLAYER_LOG_FILE, "r") as f:
-                data = json.load(f)
-        except:
-            data = []
-    else:
-        data = []
-
-    data.append(entry)
-
-    # Limit file size
-    data = data[-MAX_LOG_ENTRIES:]
-
-    with open(PLAYER_LOG_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-# Punchcard constants
-PUNCHCARD_CHANNEL_ID = 1433624015557365800
-PUNCHCARD_LOGS_CHANNEL_ID = 1433621369970495589
-RESET_DAY = 0
-RESET_HOUR = 10
-RESET_MINUTE = 0
-PUNCHCARD_FILE = "punchcard_data.json"
-
-punchcard_data = {}
-
-PUNCHCARD_ENABLED = False
-MC_LFG_ENABLED = True
-
-LFG_CHANNEL_ID = 1419213517260853350
-LFG_ROLE_ID = 1419213574206918656
-MC_LFG_ROLE_ID = 1479916696226758707
-LFG_COOLDOWN_MINUTES = 60
-MC_LFG_COOLDOWN_MINUTES = 60
-
-lfg_posts = {}
-last_lfg_time = None
-
-current_player_count = "0/0"
-
-TOKEN = os.getenv("THEATORS_BOT_TOKEN")
-
-def load_punchcard_data():
-    if not PUNCHCARD_ENABLED:
-        return {}
-    if os.path.exists(PUNCHCARD_FILE):
-        with open(PUNCHCARD_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_punchcard_data():
-    if not PUNCHCARD_ENABLED:
-        return
-    with open(PUNCHCARD_FILE, 'w') as f:
-        json.dump(punchcard_data, f, indent=4)
-
-class PunchcardButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(
-            label="Punch",
-            style=discord.ButtonStyle.primary,
-            custom_id="punchcard_button"
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        if not PUNCHCARD_ENABLED:
-            await interaction.response.send_message("Punchcard functionality is disabled.", ephemeral=True)
+class ServerBot:
+    """Class to manage a Discord bot instance for server status monitoring."""
+    
+    def __init__(self, bot_id, token, server_id, enable_lfg=False):
+        """
+        Initialize a ServerBot instance.
+        
+        Args:
+            bot_id: Identifier for this bot (e.g., "id1", "id2")
+            token: Discord bot token
+            server_id: SCP server ID to monitor
+            enable_lfg: Whether this bot has LFG functionality enabled
+        """
+        self.bot_id = bot_id
+        self.token = token
+        self.server_id = server_id
+        self.enable_lfg = enable_lfg
+        
+        # Configuration
+        self.refresh = 90
+        self.lfg_cooldown_minutes = 60
+        
+        # LFG Configuration (only used if enable_lfg is True)
+        self.lfg_channel_id = 1419213517260853350
+        self.lfg_role_id = 1419213574206918656
+        self.mc_lfg_role_id = 1479916696226758707
+        
+        # State
+        self.lfg_posts = {}
+        self.last_lfg_time = None
+        self.current_player_count = "0/0"
+        
+        # Initialize Discord bot
+        intents = discord.Intents.default()
+        intents.message_content = True
+        intents.members = True
+        intents.presences = True
+        
+        self.client = commands.Bot(command_prefix="!", intents=intents)
+        self._setup_commands()
+        self._setup_events()
+    
+    def _setup_commands(self):
+        """Setup bot commands."""
+        if not self.enable_lfg:
             return
-
-        user_id = str(interaction.user.id)
-        current_time = datetime.now()
-        logs_channel = interaction.client.get_channel(PUNCHCARD_LOGS_CHANNEL_ID)
-
-        if user_id not in punchcard_data:
-            punchcard_data[user_id] = {
-                "punched_in": True,
-                "last_punch": current_time.isoformat(),
-                "total_time": 0
+        
+        @self.client.tree.command(name="lfg")
+        async def lfg(interaction: discord.Interaction):
+            now = datetime.now()
+            if self.last_lfg_time:
+                elapsed = (now - self.last_lfg_time).total_seconds() / 60
+                if elapsed < self.lfg_cooldown_minutes:
+                    await interaction.response.send_message("Cooldown active.", ephemeral=True)
+                    return
+            
+            channel = self.client.get_channel(self.lfg_channel_id)
+            
+            # Build player count display for all bots
+            player_count_display = "\n".join(
+                [f"**{bot_id}**: {player_counts.get(bot_id, '0/0')}" for bot_id in sorted(player_counts.keys())]
+            ) if player_counts else self.current_player_count
+            
+            msg = await channel.send(f"<@&{self.lfg_role_id}> (Posted by {interaction.user.mention})\n{player_count_display}")
+            
+            self.lfg_posts[str(interaction.user.id)] = {
+                "channel_id": channel.id,
+                "message_id": msg.id,
+                "type": "lfg"
             }
-            await interaction.response.send_message(f"{interaction.user.mention} punched in.", ephemeral=True)
-        else:
-            user_data = punchcard_data[user_id]
-            if user_data["punched_in"]:
-                last_punch = datetime.fromisoformat(user_data["last_punch"])
-                time_diff = (current_time - last_punch).total_seconds()
-                user_data["total_time"] += time_diff
-                user_data["punched_in"] = False
-                await interaction.response.send_message(f"{interaction.user.mention} punched out.", ephemeral=True)
-            else:
-                user_data["punched_in"] = True
-                user_data["last_punch"] = current_time.isoformat()
-                await interaction.response.send_message(f"{interaction.user.mention} punched in.", ephemeral=True)
-
-        save_punchcard_data()
-
-@tasks.loop(minutes=1)
-async def check_weekly_reset():
-    if not PUNCHCARD_ENABLED:
-        return
-
-    current_time = datetime.now()
-    if (current_time.weekday() == RESET_DAY and 
-        current_time.hour == RESET_HOUR and 
-        current_time.minute == RESET_MINUTE):
-        channel = client.get_channel(PUNCHCARD_LOGS_CHANNEL_ID)
-        if channel:
-            report = "**Weekly Punchcard Report**\n━━━━━━━━━━━━━━━━━━━━━\n"
-            for user_id, data in punchcard_data.items():
-                user = await client.fetch_user(int(user_id))
-                total_hours = data["total_time"] / 3600
-                report += f"**{user.display_name}**: `{total_hours:.2f} hours`\n"
-
-            await channel.send(report)
-            punchcard_data.clear()
-            save_punchcard_data()
-
-@client.tree.command(name="lfg")
-async def lfg(interaction: discord.Interaction):
-    global last_lfg_time
-
-    now = datetime.now()
-    if last_lfg_time:
-        elapsed = (now - last_lfg_time).total_seconds() / 60
-        if elapsed < LFG_COOLDOWN_MINUTES:
-            await interaction.response.send_message("Cooldown active.", ephemeral=True)
-            return
-
-    channel = client.get_channel(LFG_CHANNEL_ID)
-    msg = await channel.send(f"<@&{LFG_ROLE_ID}> (Posted by {interaction.user.mention})\nPlayer Count: {current_player_count}")
-
-    lfg_posts[str(interaction.user.id)] = {
-        "channel_id": channel.id,
-        "message_id": msg.id,
-        "type": "lfg"
-    }
-
-    last_lfg_time = now
-    await interaction.response.send_message("LFG posted.", ephemeral=True)
-
-async def update_server_status():
-    last_sl_pc = None
-    last_player_count = None
-
-    while True:
-        url = f'https://api.scplist.kr/api/servers/{id2}'
-        resp = requests.get(url)
-
-        if resp.status_code != 200:
-            await asyncio.sleep(refresh)
-            continue
-
-        data = resp.json()
-        player_count = data['players']
-
-        sl_pc = int(player_count.split('/')[0])
-        max_pc = int(player_count.split('/')[1])
-
-        global current_player_count
-        current_player_count = player_count
-
-        # ✅ LOG ONLY IF CHANGED
-        if player_count != last_player_count:
-            log_player_count(player_count)
-            last_player_count = player_count
-
-        # Presence
-        if sl_pc == 0:
-            status = discord.Status.idle
-        elif sl_pc >= max_pc:
-            status = discord.Status.dnd
-        else:
-            status = discord.Status.online
-
-        await client.change_presence(
-            activity=discord.CustomActivity(name=f"Online: {player_count}"),
-            status=status
-        )
-
-        # Update LFG messages
-        for uid, info in list(lfg_posts.items()):
+            
+            self.last_lfg_time = now
+            await interaction.response.send_message("LFG posted.", ephemeral=True)
+    
+    def _setup_events(self):
+        """Setup bot events."""
+        @self.client.event
+        async def on_ready():
+            print(f"[{self.bot_id}] {self.client.user} online")
+            asyncio.create_task(self.update_server_status())
+            
             try:
-                channel = client.get_channel(info["channel_id"])
-                msg = await channel.fetch_message(info["message_id"])
-
-                if info["type"] == "minecraft":
-                    content = f"<@&{MC_LFG_ROLE_ID}> (Posted by <@{uid}>)"
+                await self.client.tree.sync()
+            except Exception as e:
+                print(f"[{self.bot_id}] Error syncing commands: {e}")
+    
+    async def update_server_status(self):
+        """Update server status and manage LFG messages."""
+        while True:
+            try:
+                url = f'https://api.scplist.kr/api/servers/{self.server_id}'
+                resp = requests.get(url)
+                
+                if resp.status_code != 200:
+                    await asyncio.sleep(self.refresh)
+                    continue
+                
+                data = resp.json()
+                player_count = data['players']
+                
+                sl_pc = int(player_count.split('/')[0])
+                max_pc = int(player_count.split('/')[1])
+                
+                self.current_player_count = player_count
+                player_counts[self.bot_id] = player_count
+                
+                # Update presence
+                if sl_pc == 0:
+                    status = discord.Status.idle
+                elif sl_pc >= max_pc:
+                    status = discord.Status.dnd
                 else:
-                    content = f"<@&{LFG_ROLE_ID}> (Posted by <@{uid}>)\nPlayer Count: {player_count}"
+                    status = discord.Status.online
+                
+                await self.client.change_presence(
+                    activity=discord.CustomActivity(name=f"Online: {player_count}"),
+                    status=status
+                )
+                
+                # Update LFG messages if enabled
+                if self.enable_lfg:
+                    # Build player count display for all bots
+                    player_count_display = "\n".join(
+                        [f"**{bot_id}**: {player_counts.get(bot_id, '0/0')}" for bot_id in sorted(player_counts.keys())]
+                    )
+                    
+                    for uid, info in list(self.lfg_posts.items()):
+                        try:
+                            channel = self.client.get_channel(info["channel_id"])
+                            msg = await channel.fetch_message(info["message_id"])
+                            
+                            if info["type"] == "minecraft":
+                                content = f"<@&{self.mc_lfg_role_id}> (Posted by <@{uid}>)"
+                            else:
+                                content = f"<@&{self.lfg_role_id}> (Posted by <@{uid}>)\n{player_count_display}"
+                            
+                            await msg.edit(content=content)
+                        
+                        except:
+                            self.lfg_posts.pop(uid, None)
+                
+                await asyncio.sleep(self.refresh)
+            
+            except Exception as e:
+                print(f"[{self.bot_id}] Error in update_server_status: {e}")
+                await asyncio.sleep(self.refresh)
+    
+    def run(self):
+        """Start the bot."""
+        self.client.run(self.token)
 
-                await msg.edit(content=content)
 
-            except:
-                lfg_posts.pop(uid, None)
+async def run_all_bots():
+    """Run all bot instances concurrently."""
+    # Define bots: (bot_id, token_env_var, server_id, enable_lfg)
+    bots_config = [
+        ("Server 1", "THEATORS_BOT_TOKEN", "95631", True),      # Primary bot with LFG
+        ("Server 2", "THEATORS_BOT_TOKEN_2", "101529", False),   # Secondary bot without LFG
+    ]
+    
+    bots = []
+    for bot_id, token_env, server_id, enable_lfg in bots_config:
+        token = os.getenv(token_env)
+        if not token:
+            print(f"Warning: {token_env} not found")
+            continue
+        
+        bot = ServerBot(bot_id, token, server_id, enable_lfg)
+        bots.append(bot)
+    
+    # Run all bots concurrently
+    tasks = [asyncio.to_thread(bot.run) for bot in bots]
+    await asyncio.gather(*tasks)
 
-        last_sl_pc = sl_pc
-        await asyncio.sleep(refresh)
 
-@client.event
-async def on_ready():
-    print(f"{client.user} online")
-
-    if PUNCHCARD_ENABLED:
-        global punchcard_data
-        punchcard_data = load_punchcard_data()
-        check_weekly_reset.start()
-
-    asyncio.create_task(update_server_status())
-
-    try:
-        await client.tree.sync()
-    except Exception as e:
-        print(e)
-
-client.run(TOKEN)
+if __name__ == "__main__":
+    asyncio.run(run_all_bots())
