@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
+import threading
 import discord
 from discord.ext import commands, tasks
 from discord.ui import View
@@ -10,6 +11,8 @@ import os
 
 # Shared state for all bots
 player_counts = {}
+lfg_last_time = None
+lfg_lock = threading.Lock()
 
 
 class ServerBot:
@@ -34,14 +37,13 @@ class ServerBot:
         self.refresh = 90
         self.lfg_cooldown_minutes = 60
         
-        # LFG Configuration (only used if enable_lfg is True)
+        # LFG Configuration
         self.lfg_channel_id = 1419213517260853350
         self.lfg_role_id = 1419213574206918656
         self.mc_lfg_role_id = 1479916696226758707
         
         # State
         self.lfg_posts = {}
-        self.last_lfg_time = None
         self.current_player_count = "0/0"
         
         # Initialize Discord bot
@@ -56,36 +58,47 @@ class ServerBot:
     
     def _setup_commands(self):
         """Setup bot commands."""
-        if not self.enable_lfg:
-            return
-        
         @self.client.tree.command(name="lfg")
         async def lfg(interaction: discord.Interaction):
+            global lfg_last_time
+
             now = datetime.now()
-            if self.last_lfg_time:
-                elapsed = (now - self.last_lfg_time).total_seconds() / 60
-                if elapsed < self.lfg_cooldown_minutes:
-                    await interaction.response.send_message("Cooldown active.", ephemeral=True)
-                    return
-            
+            with lfg_lock:
+                if lfg_last_time:
+                    elapsed = (now - lfg_last_time).total_seconds() / 60
+                    if elapsed < self.lfg_cooldown_minutes:
+                        await interaction.response.send_message("Cooldown active.", ephemeral=True)
+                        return
+                lfg_last_time = now
+
             channel = self.client.get_channel(self.lfg_channel_id)
-            
-            # Build player count display for all bots
-            player_count_display = "\n".join(
-                [f"**{bot_id}**: {player_counts.get(bot_id, '0/0')}" for bot_id in sorted(player_counts.keys())]
-            ) if player_counts else self.current_player_count
-            
-            msg = await channel.send(f"<@&{self.lfg_role_id}> (Posted by {interaction.user.mention})\n{player_count_display}")
-            
+            if channel is None:
+                await interaction.response.send_message("LFG channel not available.", ephemeral=True)
+                return
+
+            content = self.build_lfg_content()
+            msg = await channel.send(content)
+
             self.lfg_posts[str(interaction.user.id)] = {
                 "channel_id": channel.id,
                 "message_id": msg.id,
                 "type": "lfg"
             }
-            
-            self.last_lfg_time = now
+
             await interaction.response.send_message("LFG posted.", ephemeral=True)
     
+    def build_player_count_display(self):
+        """Return a consistent player count display for all bots."""
+        if player_counts:
+            return "\n".join(
+                [f"**{bot_id}**: {player_counts.get(bot_id, '0/0')}" for bot_id in sorted(player_counts.keys())]
+            )
+        return self.current_player_count
+
+    def build_lfg_content(self):
+        """Return the standardized LFG message content."""
+        return f"<@&{self.lfg_role_id}>\n{self.build_player_count_display()}"
+
     def _setup_events(self):
         """Setup bot events."""
         @self.client.event
@@ -131,12 +144,9 @@ class ServerBot:
                     status=status
                 )
                 
-                # Update LFG messages if enabled
-                if self.enable_lfg:
-                    # Build player count display for all bots
-                    player_count_display = "\n".join(
-                        [f"**{bot_id}**: {player_counts.get(bot_id, '0/0')}" for bot_id in sorted(player_counts.keys())]
-                    )
+                # Update LFG messages
+                if self.lfg_posts:
+                    player_count_display = self.build_player_count_display()
                     
                     for uid, info in list(self.lfg_posts.items()):
                         try:
@@ -146,7 +156,7 @@ class ServerBot:
                             if info["type"] == "minecraft":
                                 content = f"<@&{self.mc_lfg_role_id}> (Posted by <@{uid}>)"
                             else:
-                                content = f"<@&{self.lfg_role_id}> (Posted by <@{uid}>)\n{player_count_display}"
+                                content = f"<@&{self.lfg_role_id}>\n{player_count_display}"
                             
                             await msg.edit(content=content)
                         
@@ -168,8 +178,7 @@ async def run_all_bots():
     """Run all bot instances concurrently."""
     # Define bots: (bot_id, token_env_var, server_id, enable_lfg)
     bots_config = [
-        ("Server 1", "THEATORS_BOT_TOKEN", "95631", True),      # Primary bot with LFG
-        ("Server 2", "THEATORS_BOT_TOKEN_2", "101529", False),   # Secondary bot without LFG
+        ("Server", "THEATORS_BOT_TOKEN_2", "101529", False),   # Secondary bot without LFG
     ]
     
     bots = []
