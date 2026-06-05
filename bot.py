@@ -82,13 +82,14 @@ class ServerBot:
                     await interaction.followup.send("LFG channel not available.", ephemeral=True)
                     return
 
-                content = self.build_lfg_content()
+                content = self.build_lfg_content(interaction.user.id)
                 msg = await channel.send(content)
 
                 self.lfg_posts[str(interaction.user.id)] = {
                     "channel_id": channel.id,
                     "message_id": msg.id,
-                    "type": "lfg"
+                    "type": "lfg",
+                    "author_id": interaction.user.id
                 }
 
                 await interaction.followup.send("LFG posted.", ephemeral=True)
@@ -108,9 +109,10 @@ class ServerBot:
             )
         return self.current_player_count
 
-    def build_lfg_content(self):
+    def build_lfg_content(self, author_id=None):
         """Return the standardized LFG message content."""
-        return f"<@&{self.lfg_role_id}>\n{self.build_player_count_display()}"
+        author_line = f"Posted by <@{author_id}>\n" if author_id else ""
+        return f"<@&{self.lfg_role_id}>\n{author_line}{self.build_player_count_display()}"
 
     def _setup_events(self):
         """Setup bot events."""
@@ -169,7 +171,9 @@ class ServerBot:
                             if info["type"] == "minecraft":
                                 content = f"<@&{self.mc_lfg_role_id}> (Posted by <@{uid}>)"
                             else:
-                                content = f"<@&{self.lfg_role_id}>\n{player_count_display}"
+                                author_id = info.get("author_id")
+                                author_line = f"Posted by <@{author_id}>\n" if author_id else ""
+                                content = f"<@&{self.lfg_role_id}>\n{author_line}{player_count_display}"
                             
                             await msg.edit(content=content)
                         
