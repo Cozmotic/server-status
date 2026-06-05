@@ -58,34 +58,47 @@ class ServerBot:
     
     def _setup_commands(self):
         """Setup bot commands."""
+        if not self.enable_lfg:
+            return
+        
         @self.client.tree.command(name="lfg")
         async def lfg(interaction: discord.Interaction):
             global lfg_last_time
+            
+            try:
+                await interaction.response.defer(ephemeral=True)
+                
+                now = datetime.now()
+                with lfg_lock:
+                    if lfg_last_time:
+                        elapsed = (now - lfg_last_time).total_seconds() / 60
+                        if elapsed < self.lfg_cooldown_minutes:
+                            await interaction.followup.send("Cooldown active.", ephemeral=True)
+                            return
+                    lfg_last_time = now
 
-            now = datetime.now()
-            with lfg_lock:
-                if lfg_last_time:
-                    elapsed = (now - lfg_last_time).total_seconds() / 60
-                    if elapsed < self.lfg_cooldown_minutes:
-                        await interaction.response.send_message("Cooldown active.", ephemeral=True)
-                        return
-                lfg_last_time = now
+                channel = self.client.get_channel(self.lfg_channel_id)
+                if channel is None:
+                    await interaction.followup.send("LFG channel not available.", ephemeral=True)
+                    return
 
-            channel = self.client.get_channel(self.lfg_channel_id)
-            if channel is None:
-                await interaction.response.send_message("LFG channel not available.", ephemeral=True)
-                return
+                content = self.build_lfg_content()
+                msg = await channel.send(content)
 
-            content = self.build_lfg_content()
-            msg = await channel.send(content)
+                self.lfg_posts[str(interaction.user.id)] = {
+                    "channel_id": channel.id,
+                    "message_id": msg.id,
+                    "type": "lfg"
+                }
 
-            self.lfg_posts[str(interaction.user.id)] = {
-                "channel_id": channel.id,
-                "message_id": msg.id,
-                "type": "lfg"
-            }
-
-            await interaction.response.send_message("LFG posted.", ephemeral=True)
+                await interaction.followup.send("LFG posted.", ephemeral=True)
+            
+            except Exception as e:
+                print(f"[{self.bot_id}] Error in /lfg command: {e}")
+                try:
+                    await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+                except:
+                    pass
     
     def build_player_count_display(self):
         """Return a consistent player count display for all bots."""
@@ -178,7 +191,7 @@ async def run_all_bots():
     """Run all bot instances concurrently."""
     # Define bots: (bot_id, token_env_var, server_id, enable_lfg)
     bots_config = [
-        ("Server", "THEATORS_BOT_TOKEN_2", "101529", False),   # Secondary bot without LFG
+        ("Server", "THEATORS_BOT_TOKEN_2", "101529", True),
     ]
     
     bots = []
