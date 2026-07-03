@@ -168,8 +168,7 @@ class ServerBot:
         channel is configured or the send fails for any reason (missing
         perms, channel deleted, etc.).
         """
-        #prefix = f"<@&{self.staff_ping_role_id}> " if (ping_role and self.staff_ping_role_id) else ""
-        prefix = ""  # Removed ping to avoid unwanted notifications
+        prefix = f"<@&{self.staff_ping_role_id}> " if (ping_role and self.staff_ping_role_id) else ""
         full_message = f"{prefix}{message}"
 
         print(f"[{self.bot_id}] STAFF REPORT: {message}")
@@ -347,7 +346,7 @@ class ServerBot:
         self._save_id_set(self.alerted_message_authors_file, self.alerted_message_author_ids)
 
         await self._report_to_staff(
-            f"{message.author.mention} has posted in {message.channel.mention}: "
+            f"{message.author.mention} has posted in "
             f"{message.jump_url}. Please review.",
             ping_role=True
         )
