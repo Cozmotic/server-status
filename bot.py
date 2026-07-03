@@ -43,7 +43,7 @@ class ServerBot:
         self.mc_lfg_role_id = 1479916696226758707
 
         # Automatic kick configuration: set to a role ID to kick any member who has that role.
-        self.auto_kick_role_id = 0  # Replace with the role ID to auto-kick, or leave 0 to disable.
+        self.auto_kick_role_id = 1522404077584122017  # Replace with the role ID to auto-kick, or leave 0 to disable.
         self.auto_kick_exempt_role_ids = [1419382592301564116, 1419331031466643639]  # Members with any of these roles will not be kicked.
 
         # Safety cap: if a bulk scan (e.g. on startup) finds more than this many
