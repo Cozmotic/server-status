@@ -42,29 +42,29 @@ class ServerBot:
         self.lfg_role_id = 1419213574206918656
         self.mc_lfg_role_id = 1479916696226758707
 
-        # Automatic kick configuration: set to a role ID to kick any member who has that role.
-        self.auto_kick_role_id = 1522404077584122017  # Replace with the role ID to auto-kick, or leave 0 to disable.
-        self.auto_kick_exempt_role_ids = [1419382592301564116, 1419331031466643639]  # Members with any of these roles will not be kicked.
+        # Flagged-role configuration: set to a role ID to watch for. When a
+        # member is found holding this role (on join, on role update, or
+        # during the startup scan), staff are notified in the staff report
+        # channel instead of the member being kicked. Leave 0 to disable.
+        self.auto_kick_role_id = 1522404077584122017
+        # Members holding any of these roles never trigger an alert, even if
+        # they hold auto_kick_role_id.
+        self.auto_kick_exempt_role_ids = [1419382592301564116, 1419331031466643639]
 
-        # Safety cap: if a bulk scan (e.g. on startup) finds more than this many
-        # kick-eligible members at once, refuse to kick any of them and report
-        # to staff instead. This protects against a misconfigured role ID
-        # causing a mass-kick.
-        self.max_kicks_per_scan = 3
+        # Role to ping in the staff report channel when a member is flagged.
+        # Leave 0 to post the alert without pinging a role.
+        self.staff_ping_role_id = 0  # Replace with your staff role ID.
 
-        # Channel where staff should be notified about auto-kicks, cancelled
-        # bulk-kick attempts, and other moderation-relevant events. Set this
-        # to a real channel ID to enable reporting.
+        # Safety cap: if a bulk scan (e.g. on startup) finds more than this
+        # many flagged members at once, staff get a single summary alert
+        # instead of one ping per member. This avoids spamming the staff
+        # channel and signals that auto_kick_role_id might be misconfigured
+        # (e.g. pointing at a role far more members hold than expected).
+        self.max_flags_per_scan = 3
+
+        # Channel where staff are notified when a member is found holding
+        # the flagged role, and other moderation-relevant events.
         self.staff_report_channel_id = 782358025663021146  # Replace with your staff/log channel ID.
-
-        # Dry run mode: when True, every auto-kick decision (individual
-        # events AND the startup bulk scan) is evaluated exactly as normal
-        # -- role checks, exemptions, the privileged-member guard, and the
-        # max_kicks_per_scan cap -- but member.kick() is never actually
-        # called. Staff reports are still sent, prefixed with "[DRY RUN]",
-        # so you can safely validate behavior against a real, live server
-        # before enabling real kicks. Set to False to allow real kicks.
-        self.dry_run = True
 
         # State
         self.lfg_posts = {}
@@ -142,14 +142,16 @@ class ServerBot:
     # Staff reporting
     # ------------------------------------------------------------------
 
-    async def _report_to_staff(self, message):
+    async def _report_to_staff(self, message, ping_role=False):
         """Send a moderation-relevant message to the staff report channel.
 
-        Falls back to console logging if no channel is configured or the
-        send fails for any reason (missing perms, channel deleted, etc.).
+        If ping_role is True and staff_ping_role_id is set, the role is
+        pinged as part of the message. Falls back to console logging if no
+        channel is configured or the send fails for any reason (missing
+        perms, channel deleted, etc.).
         """
-        if self.dry_run:
-            message = f"[DRY RUN] {message}"
+        prefix = f"<@&{self.staff_ping_role_id}> " if (ping_role and self.staff_ping_role_id) else ""
+        full_message = f"{prefix}{message}"
 
         print(f"[{self.bot_id}] STAFF REPORT: {message}")
 
@@ -162,85 +164,64 @@ class ServerBot:
             return
 
         try:
-            await channel.send(message)
+            await channel.send(full_message)
         except Exception as e:
             print(f"[{self.bot_id}] Failed to send staff report: {e}")
 
     # ------------------------------------------------------------------
-    # Auto-kick logic
+    # Flagged-role detection (alerts staff instead of kicking)
     # ------------------------------------------------------------------
 
     def _member_has_exempt_role(self, member):
         return any(role.id in self.auto_kick_exempt_role_ids for role in member.roles)
 
-    def _member_has_auto_kick_role(self, member):
+    def _member_has_flagged_role(self, member):
         return self.auto_kick_role_id and any(role.id == self.auto_kick_role_id for role in member.roles)
 
-    def _member_is_privileged(self, member):
-        """Members we should never auto-kick regardless of role config."""
-        guild = member.guild
-        if guild.owner_id == member.id:
-            return True
-        try:
-            if member.guild_permissions.administrator:
-                return True
-        except AttributeError:
-            pass
-        return False
-
-    def _member_is_kick_eligible(self, member):
-        if not self._member_has_auto_kick_role(member):
+    def _member_is_flagged(self, member):
+        if not self._member_has_flagged_role(member):
             return False
         if self._member_has_exempt_role(member):
-            return False
-        if self._member_is_privileged(member):
             return False
         return True
 
-    async def _kick_member_if_forbidden(self, member):
-        """Kick a single member if eligible. Used for individual events
-        (member join, role update) where at most one member is ever in
-        scope, so no bulk-safety cap is needed here."""
-        if not self._member_has_auto_kick_role(member):
+    async def _alert_staff_of_flagged_member(self, member):
+        """Notify staff (pinging the configured staff role) that a single
+        member has been found holding the flagged role. Used for individual
+        events (member join, role update).
+
+        Only the bot instance with enable_lfg=True sends these alerts, so
+        that if multiple bot instances share the same staff channel, staff
+        aren't pinged more than once for the same member."""
+        if not self.enable_lfg:
+            return
+
+        if not self._member_has_flagged_role(member):
             return
 
         if self._member_has_exempt_role(member):
-            print(f"[{self.bot_id}] Skipping kick for {member}; exempt role present")
+            print(f"[{self.bot_id}] Skipping alert for {member}; exempt role present")
             return
 
-        if self._member_is_privileged(member):
-            await self._report_to_staff(
-                f":warning: {member} ({member.id}) has the auto-kick role but is the server owner "
-                f"or an administrator. Skipped automatic kick — please review manually."
-            )
-            return
-
-        if self.dry_run:
-            print(f"[{self.bot_id}] (dry run) Would kick member {member} for role {self.auto_kick_role_id}")
-            await self._report_to_staff(
-                f":boot: Would have auto-kicked {member} ({member.id}) for holding role "
-                f"{self.auto_kick_role_id}. No action taken (dry run)."
-            )
-            return
-
-        try:
-            # await member.kick(reason=f"Automatic kick for forbidden role {self.auto_kick_role_id}")
-            print(f"[{self.bot_id}] Kicked member {member} for role {self.auto_kick_role_id}")
-            await self._report_to_staff(
-                f":boot: Auto-kicked {member} ({member.id}) for holding role {self.auto_kick_role_id}."
-            )
-        except Exception as e:
-            print(f"[{self.bot_id}] Failed to kick member {member}: {e}")
-            await self._report_to_staff(
-                f":x: Failed to auto-kick {member} ({member.id}): {e}"
-            )
+        await self._report_to_staff(
+            f"{member.mention} has just been given the "
+            f"<@&{self.auto_kick_role_id}> role in {member.guild.name}. Please review.",
+            ping_role=True
+        )
 
     async def _scan_guilds_for_forbidden_role(self):
-        """Bulk scan run on startup. Only ever kicks if exactly one
-        member is eligible in a guild. If more than
-        `max_kicks_per_scan` members are eligible, the whole sweep for
-        that guild is cancelled and staff are notified instead — this
-        protects against a misconfigured role ID mass-kicking members."""
+        """Bulk scan run on startup. If max_flags_per_scan or fewer members
+        are found holding the flagged role, staff get one ping per member.
+        If more than that are found at once, a single summary alert is sent
+        instead of pinging once per member — this also acts as a signal that
+        auto_kick_role_id may be misconfigured.
+
+        Only the bot instance with enable_lfg=True runs this scan, so that
+        if multiple bot instances share the same staff channel, staff aren't
+        alerted twice for the same members."""
+        if not self.enable_lfg:
+            return
+
         if not self.auto_kick_role_id:
             return
 
@@ -252,43 +233,25 @@ class ServerBot:
             except Exception as e:
                 print(f"[{self.bot_id}] Could not chunk members for {guild.name}: {e}")
 
-            eligible = [m for m in guild.members if self._member_is_kick_eligible(m)]
-            privileged_but_flagged = [
-                m for m in guild.members
-                if self._member_has_auto_kick_role(m)
-                and not self._member_has_exempt_role(m)
-                and self._member_is_privileged(m)
-            ]
+            flagged = [m for m in guild.members if self._member_is_flagged(m)]
 
-            for m in privileged_but_flagged:
-                await self._report_to_staff(
-                    f":warning: {m} ({m.id}) in **{guild.name}** has the auto-kick role but is the "
-                    f"server owner or an administrator. Skipped — please review manually."
-                )
-
-            if len(eligible) == 0:
+            if len(flagged) == 0:
                 continue
 
-            if len(eligible) > self.max_kicks_per_scan:
-                names = ", ".join(f"{m} ({m.id})" for m in eligible[:20])
-                more = f" and {len(eligible) - 20} more" if len(eligible) > 20 else ""
-                no_one_note = (
-                    "No one would be kicked (dry run)."
-                    if self.dry_run else
-                    "**No one was kicked.**"
-                )
+            if len(flagged) > self.max_flags_per_scan:
+                names = ", ".join(m.mention for m in flagged[:20])
+                more = f" and {len(flagged) - 20} more" if len(flagged) > 20 else ""
                 await self._report_to_staff(
-                    f":rotating_light: Startup auto-kick scan in **{guild.name}** found "
-                    f"{len(eligible)} members eligible for kicking (limit is "
-                    f"{self.max_kicks_per_scan} per scan). {no_one_note} "
-                    f"This usually means `auto_kick_role_id` is misconfigured — please verify it "
-                    f"before re-running. Affected members: {names}{more}"
+                    f"Startup scan in {guild.name} found {len(flagged)} members holding "
+                    f"<@&{self.auto_kick_role_id}> at once, more than the per-scan summary "
+                    f"threshold of {self.max_flags_per_scan}. This may mean the flagged role "
+                    f"is misconfigured — please verify it. Affected members: {names}{more}",
+                    ping_role=True
                 )
                 continue
 
-            # len(eligible) is within the allowed cap — safe to proceed.
-            for member in eligible:
-                await self._kick_member_if_forbidden(member)
+            for member in flagged:
+                await self._alert_staff_of_flagged_member(member)
                 await asyncio.sleep(1)
 
     def _setup_events(self):
@@ -297,8 +260,6 @@ class ServerBot:
         async def on_ready():
             print(f"[{self.bot_id}] {self.client.user} online")
             if self.auto_kick_role_id:
-                if self.dry_run:
-                    print(f"[{self.bot_id}] Auto-kick is running in DRY RUN mode — no members will actually be kicked.")
                 await self._scan_guilds_for_forbidden_role()
             asyncio.create_task(self.update_server_status())
 
@@ -309,7 +270,7 @@ class ServerBot:
 
         @self.client.event
         async def on_member_join(member):
-            await self._kick_member_if_forbidden(member)
+            await self._alert_staff_of_flagged_member(member)
 
         @self.client.event
         async def on_member_update(before, after):
@@ -319,14 +280,14 @@ class ServerBot:
             before_ids = {role.id for role in before.roles}
             after_ids = {role.id for role in after.roles}
 
-            gained_forbidden = (
+            gained_flagged = (
                 self.auto_kick_role_id in after_ids
                 and self.auto_kick_role_id not in before_ids
             )
 
-            # If a member already had the forbidden role but was protected by
+            # If a member already had the flagged role but was protected by
             # an exempt role, and that exempt role has just been removed,
-            # they are now eligible and should be re-checked.
+            # they're now eligible for an alert and should be re-checked.
             had_exempt = any(r in before_ids for r in self.auto_kick_exempt_role_ids)
             has_exempt = any(r in after_ids for r in self.auto_kick_exempt_role_ids)
             lost_exemption = (
@@ -335,8 +296,8 @@ class ServerBot:
                 and not has_exempt
             )
 
-            if gained_forbidden or lost_exemption:
-                await self._kick_member_if_forbidden(after)
+            if gained_flagged or lost_exemption:
+                await self._alert_staff_of_flagged_member(after)
 
     async def update_server_status(self):
         """Update server status and manage LFG messages."""
