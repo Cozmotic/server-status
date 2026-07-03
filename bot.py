@@ -55,7 +55,16 @@ class ServerBot:
         # Channel where staff should be notified about auto-kicks, cancelled
         # bulk-kick attempts, and other moderation-relevant events. Set this
         # to a real channel ID to enable reporting.
-        self.staff_report_channel_id = 0  # Replace with your staff/log channel ID.
+        self.staff_report_channel_id = 782358025663021146  # Replace with your staff/log channel ID.
+
+        # Dry run mode: when True, every auto-kick decision (individual
+        # events AND the startup bulk scan) is evaluated exactly as normal
+        # -- role checks, exemptions, the privileged-member guard, and the
+        # max_kicks_per_scan cap -- but member.kick() is never actually
+        # called. Staff reports are still sent, prefixed with "[DRY RUN]",
+        # so you can safely validate behavior against a real, live server
+        # before enabling real kicks. Set to False to allow real kicks.
+        self.dry_run = True
 
         # State
         self.lfg_posts = {}
@@ -139,6 +148,9 @@ class ServerBot:
         Falls back to console logging if no channel is configured or the
         send fails for any reason (missing perms, channel deleted, etc.).
         """
+        if self.dry_run:
+            message = f"[DRY RUN] {message}"
+
         print(f"[{self.bot_id}] STAFF REPORT: {message}")
 
         if not self.staff_report_channel_id:
@@ -203,8 +215,16 @@ class ServerBot:
             )
             return
 
+        if self.dry_run:
+            print(f"[{self.bot_id}] (dry run) Would kick member {member} for role {self.auto_kick_role_id}")
+            await self._report_to_staff(
+                f":boot: Would have auto-kicked {member} ({member.id}) for holding role "
+                f"{self.auto_kick_role_id}. No action taken (dry run)."
+            )
+            return
+
         try:
-            await member.kick(reason=f"Automatic kick for forbidden role {self.auto_kick_role_id}")
+            # await member.kick(reason=f"Automatic kick for forbidden role {self.auto_kick_role_id}")
             print(f"[{self.bot_id}] Kicked member {member} for role {self.auto_kick_role_id}")
             await self._report_to_staff(
                 f":boot: Auto-kicked {member} ({member.id}) for holding role {self.auto_kick_role_id}."
@@ -252,10 +272,15 @@ class ServerBot:
             if len(eligible) > self.max_kicks_per_scan:
                 names = ", ".join(f"{m} ({m.id})" for m in eligible[:20])
                 more = f" and {len(eligible) - 20} more" if len(eligible) > 20 else ""
+                no_one_note = (
+                    "No one would be kicked (dry run)."
+                    if self.dry_run else
+                    "**No one was kicked.**"
+                )
                 await self._report_to_staff(
                     f":rotating_light: Startup auto-kick scan in **{guild.name}** found "
                     f"{len(eligible)} members eligible for kicking (limit is "
-                    f"{self.max_kicks_per_scan} per scan). **No one was kicked.** "
+                    f"{self.max_kicks_per_scan} per scan). {no_one_note} "
                     f"This usually means `auto_kick_role_id` is misconfigured — please verify it "
                     f"before re-running. Affected members: {names}{more}"
                 )
@@ -272,6 +297,8 @@ class ServerBot:
         async def on_ready():
             print(f"[{self.bot_id}] {self.client.user} online")
             if self.auto_kick_role_id:
+                if self.dry_run:
+                    print(f"[{self.bot_id}] Auto-kick is running in DRY RUN mode — no members will actually be kicked.")
                 await self._scan_guilds_for_forbidden_role()
             asyncio.create_task(self.update_server_status())
 
@@ -380,7 +407,7 @@ async def run_all_bots():
     """Run all bot instances concurrently."""
     # Define bots: (bot_id, token_env_var, server_id, enable_lfg)
     bots_config = [
-        ("Server 1", "THEATORS_BOT_TOKEN", "95631", True)
+        ("Server 1", "THEATORS_BOT_TOKEN", "95631", True),
         ("Server 2", "THEATORS_BOT_TOKEN_2", "101529", False),
     ]
 
