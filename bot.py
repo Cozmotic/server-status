@@ -380,7 +380,8 @@ async def run_all_bots():
     """Run all bot instances concurrently."""
     # Define bots: (bot_id, token_env_var, server_id, enable_lfg)
     bots_config = [
-        ("Server", "THEATORS_BOT_TOKEN_2", "101529", True),
+        ("Server 1", "THEATORS_BOT_TOKEN", "95631", True)
+        ("Server 2", "THEATORS_BOT_TOKEN_2", "101529", False),
     ]
 
     bots = []
