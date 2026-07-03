@@ -46,25 +46,25 @@ class ServerBot:
         # member is found holding this role (on join, on role update, or
         # during the startup scan), staff are notified in the staff report
         # channel instead of the member being kicked. Leave 0 to disable.
-        self.auto_kick_role_id = 1522404077584122017
+        self.auto_kick_role_id = 1522399280030154792
         # Members holding any of these roles never trigger an alert, even if
         # they hold auto_kick_role_id.
         self.auto_kick_exempt_role_ids = [1419382592301564116, 1419331031466643639]
 
         # Role to ping in the staff report channel when a member is flagged.
         # Leave 0 to post the alert without pinging a role.
-        self.staff_ping_role_id = 0  # Replace with your staff role ID.
-
-        # Safety cap: if a bulk scan (e.g. on startup) finds more than this
-        # many flagged members at once, staff get a single summary alert
-        # instead of one ping per member. This avoids spamming the staff
-        # channel and signals that auto_kick_role_id might be misconfigured
-        # (e.g. pointing at a role far more members hold than expected).
-        self.max_flags_per_scan = 3
+        self.staff_ping_role_id = 1419382592301564116  # Replace with your staff role ID.
 
         # Channel where staff are notified when a member is found holding
         # the flagged role, and other moderation-relevant events.
-        self.staff_report_channel_id = 782358025663021146  # Replace with your staff/log channel ID.
+        self.staff_report_channel_id = 1419155961033130016  # Replace with your staff/log channel ID.
+
+        # Members who have already been alerted on are recorded here so
+        # they are never pinged about again, even across restarts or if
+        # they lose and re-gain the flagged role. Persisted to a small JSON
+        # file on disk, one per bot instance.
+        self.alerted_members_file = f"alerted_members_{self.bot_id}.json"
+        self.alerted_member_ids = self._load_alerted_members()
 
         # State
         self.lfg_posts = {}
@@ -172,6 +172,25 @@ class ServerBot:
     # Flagged-role detection (alerts staff instead of kicking)
     # ------------------------------------------------------------------
 
+    def _load_alerted_members(self):
+        """Load the set of member IDs already alerted on from disk."""
+        try:
+            with open(self.alerted_members_file, "r") as f:
+                return set(json.load(f))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return set()
+        except Exception as e:
+            print(f"[{self.bot_id}] Failed to load alerted members file: {e}")
+            return set()
+
+    def _save_alerted_members(self):
+        """Persist the set of member IDs already alerted on to disk."""
+        try:
+            with open(self.alerted_members_file, "w") as f:
+                json.dump(list(self.alerted_member_ids), f)
+        except Exception as e:
+            print(f"[{self.bot_id}] Failed to save alerted members file: {e}")
+
     def _member_has_exempt_role(self, member):
         return any(role.id in self.auto_kick_exempt_role_ids for role in member.roles)
 
@@ -183,12 +202,18 @@ class ServerBot:
             return False
         if self._member_has_exempt_role(member):
             return False
+        if member.id in self.alerted_member_ids:
+            return False
         return True
 
     async def _alert_staff_of_flagged_member(self, member):
         """Notify staff (pinging the configured staff role) that a single
         member has been found holding the flagged role. Used for individual
         events (member join, role update).
+
+        Each member is only ever alerted on once. The alert is recorded to
+        disk immediately so the member is never pinged about again, even
+        across restarts.
 
         Only the bot instance with enable_lfg=True sends these alerts, so
         that if multiple bot instances share the same staff channel, staff
@@ -203,6 +228,12 @@ class ServerBot:
             print(f"[{self.bot_id}] Skipping alert for {member}; exempt role present")
             return
 
+        if member.id in self.alerted_member_ids:
+            return
+
+        self.alerted_member_ids.add(member.id)
+        self._save_alerted_members()
+
         await self._report_to_staff(
             f"{member.mention} has just been given the "
             f"<@&{self.auto_kick_role_id}> role in {member.guild.name}. Please review.",
@@ -210,11 +241,8 @@ class ServerBot:
         )
 
     async def _scan_guilds_for_forbidden_role(self):
-        """Bulk scan run on startup. If max_flags_per_scan or fewer members
-        are found holding the flagged role, staff get one ping per member.
-        If more than that are found at once, a single summary alert is sent
-        instead of pinging once per member — this also acts as a signal that
-        auto_kick_role_id may be misconfigured.
+        """Bulk scan run on startup. Alerts staff once per member currently
+        holding the flagged role who hasn't already been alerted on.
 
         Only the bot instance with enable_lfg=True runs this scan, so that
         if multiple bot instances share the same staff channel, staff aren't
@@ -234,21 +262,6 @@ class ServerBot:
                 print(f"[{self.bot_id}] Could not chunk members for {guild.name}: {e}")
 
             flagged = [m for m in guild.members if self._member_is_flagged(m)]
-
-            if len(flagged) == 0:
-                continue
-
-            if len(flagged) > self.max_flags_per_scan:
-                names = ", ".join(m.mention for m in flagged[:20])
-                more = f" and {len(flagged) - 20} more" if len(flagged) > 20 else ""
-                await self._report_to_staff(
-                    f"Startup scan in {guild.name} found {len(flagged)} members holding "
-                    f"<@&{self.auto_kick_role_id}> at once, more than the per-scan summary "
-                    f"threshold of {self.max_flags_per_scan}. This may mean the flagged role "
-                    f"is misconfigured — please verify it. Affected members: {names}{more}",
-                    ping_role=True
-                )
-                continue
 
             for member in flagged:
                 await self._alert_staff_of_flagged_member(member)
