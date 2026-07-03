@@ -64,7 +64,25 @@ class ServerBot:
         # they lose and re-gain the flagged role. Persisted to a small JSON
         # file on disk, one per bot instance.
         self.alerted_members_file = f"alerted_members_{self.bot_id}.json"
-        self.alerted_member_ids = self._load_alerted_members()
+        self.alerted_member_ids = self._load_id_set(self.alerted_members_file)
+
+        # Watched-channel message alert: when any non-bot member posts a
+        # message in this channel, staff are notified -- unlike the
+        # flagged-role alert above, exempt roles do NOT prevent this alert,
+        # since posting in the channel is itself the signal being watched
+        # for. Set to 0 to disable. The channel's first-ever message is
+        # treated as a pinned info message and never triggers an alert.
+        self.watched_message_channel_id = 1522658894529433710  # Set to a channel ID to enable.
+
+        # Members who have already been alerted on for posting in the
+        # watched channel, tracked separately from the flagged-role alerts
+        # above (a member could trigger one, the other, or both).
+        self.alerted_message_authors_file = f"alerted_message_authors_{self.bot_id}.json"
+        self.alerted_message_author_ids = self._load_id_set(self.alerted_message_authors_file)
+
+        # Cache of the watched channel's first (oldest) message ID, looked
+        # up lazily the first time a message in that channel is seen.
+        self._watched_channel_first_message_id = None
 
         # State
         self.lfg_posts = {}
@@ -150,7 +168,8 @@ class ServerBot:
         channel is configured or the send fails for any reason (missing
         perms, channel deleted, etc.).
         """
-        prefix = f"<@&{self.staff_ping_role_id}> " if (ping_role and self.staff_ping_role_id) else ""
+        #prefix = f"<@&{self.staff_ping_role_id}> " if (ping_role and self.staff_ping_role_id) else ""
+        prefix = ""  # Removed ping to avoid unwanted notifications
         full_message = f"{prefix}{message}"
 
         print(f"[{self.bot_id}] STAFF REPORT: {message}")
@@ -172,24 +191,25 @@ class ServerBot:
     # Flagged-role detection (alerts staff instead of kicking)
     # ------------------------------------------------------------------
 
-    def _load_alerted_members(self):
-        """Load the set of member IDs already alerted on from disk."""
+    def _load_id_set(self, path):
+        """Load a JSON list of IDs from disk into a set. Used for both the
+        flagged-role and watched-channel-message alert histories."""
         try:
-            with open(self.alerted_members_file, "r") as f:
+            with open(path, "r") as f:
                 return set(json.load(f))
         except (FileNotFoundError, json.JSONDecodeError):
             return set()
         except Exception as e:
-            print(f"[{self.bot_id}] Failed to load alerted members file: {e}")
+            print(f"[{self.bot_id}] Failed to load {path}: {e}")
             return set()
 
-    def _save_alerted_members(self):
-        """Persist the set of member IDs already alerted on to disk."""
+    def _save_id_set(self, path, id_set):
+        """Persist a set of IDs to disk as a JSON list."""
         try:
-            with open(self.alerted_members_file, "w") as f:
-                json.dump(list(self.alerted_member_ids), f)
+            with open(path, "w") as f:
+                json.dump(list(id_set), f)
         except Exception as e:
-            print(f"[{self.bot_id}] Failed to save alerted members file: {e}")
+            print(f"[{self.bot_id}] Failed to save {path}: {e}")
 
     def _member_has_exempt_role(self, member):
         return any(role.id in self.auto_kick_exempt_role_ids for role in member.roles)
@@ -232,11 +252,11 @@ class ServerBot:
             return
 
         self.alerted_member_ids.add(member.id)
-        self._save_alerted_members()
+        self._save_id_set(self.alerted_members_file, self.alerted_member_ids)
 
         await self._report_to_staff(
             f"{member.mention} has just been given the "
-            f"<@&{self.auto_kick_role_id}> role in {member.guild.name}. Please review.",
+            f"<@&{self.auto_kick_role_id}> role. Please review.",
             ping_role=True
         )
 
@@ -267,6 +287,71 @@ class ServerBot:
                 await self._alert_staff_of_flagged_member(member)
                 await asyncio.sleep(1)
 
+    # ------------------------------------------------------------------
+    # Watched-channel message alert (alerts staff instead of kicking)
+    # ------------------------------------------------------------------
+
+    async def _get_watched_channel_first_message_id(self, channel):
+        """Return (and cache) the ID of the watched channel's first-ever
+        message, so it can be excluded from triggering alerts -- it's
+        assumed to be a pinned info/rules message, not a real post.
+
+        Looked up lazily on the first message seen in the channel rather
+        than at startup, so it still works correctly even if the channel
+        wasn't cached yet at on_ready."""
+        if self._watched_channel_first_message_id is not None:
+            return self._watched_channel_first_message_id
+
+        try:
+            async for first_message in channel.history(limit=1, oldest_first=True):
+                self._watched_channel_first_message_id = first_message.id
+                return self._watched_channel_first_message_id
+        except Exception as e:
+            print(f"[{self.bot_id}] Could not fetch first message of watched channel: {e}")
+
+        return None
+
+    async def _alert_staff_of_watched_channel_message(self, message):
+        """Notify staff that a member has posted in the watched channel.
+
+        This mirrors the flagged-role alert in every other respect: each
+        member is only ever alerted on once, permanently (persisted to
+        disk, so it holds across restarts), and only the bot instance with
+        enable_lfg=True sends these alerts, to avoid duplicate staff pings
+        if multiple instances share the same staff channel.
+
+        The one deliberate difference: exempt roles are NOT checked here.
+        Posting in this channel is itself the signal being watched for, so
+        it applies regardless of any roles the member holds.
+        """
+        if not self.enable_lfg:
+            return
+
+        if not self.watched_message_channel_id:
+            return
+
+        if message.channel.id != self.watched_message_channel_id:
+            return
+
+        if message.author.bot:
+            return
+
+        first_message_id = await self._get_watched_channel_first_message_id(message.channel)
+        if first_message_id is not None and message.id == first_message_id:
+            return
+
+        if message.author.id in self.alerted_message_author_ids:
+            return
+
+        self.alerted_message_author_ids.add(message.author.id)
+        self._save_id_set(self.alerted_message_authors_file, self.alerted_message_author_ids)
+
+        await self._report_to_staff(
+            f"{message.author.mention} has posted in {message.channel.mention}: "
+            f"{message.jump_url}. Please review.",
+            ping_role=True
+        )
+
     def _setup_events(self):
         """Setup bot events."""
         @self.client.event
@@ -284,6 +369,14 @@ class ServerBot:
         @self.client.event
         async def on_member_join(member):
             await self._alert_staff_of_flagged_member(member)
+
+        @self.client.event
+        async def on_message(message):
+            await self._alert_staff_of_watched_channel_message(message)
+            # No prefix commands are defined on this bot (only slash
+            # commands), but process_commands is called for forward
+            # compatibility in case any get added later.
+            await self.client.process_commands(message)
 
         @self.client.event
         async def on_member_update(before, after):
