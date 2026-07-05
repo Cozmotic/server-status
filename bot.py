@@ -18,7 +18,7 @@ lfg_lock = threading.Lock()
 class ServerBot:
     """Class to manage a Discord bot instance for server status monitoring."""
 
-    def __init__(self, bot_id, token, server_id, enable_lfg=False, debug_mode=False):
+    def __init__(self, bot_id, token, server_id, enable_lfg=False, debug_mode=True):
         """
         Initialize a ServerBot instance.
 
@@ -34,7 +34,7 @@ class ServerBot:
         self.token = token
         self.server_id = server_id
         self.enable_lfg = enable_lfg
-        self.debug_mode = debug_mode or str(os.getenv("SERVER_STATUS_DEBUG_MODE", "")).lower() in {"1", "true", "yes", "on"}
+        self.debug_mode = True
 
         # Configuration
         self.refresh = 90
