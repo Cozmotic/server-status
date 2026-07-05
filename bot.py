@@ -18,7 +18,7 @@ lfg_lock = threading.Lock()
 class ServerBot:
     """Class to manage a Discord bot instance for server status monitoring."""
 
-    def __init__(self, bot_id, token, server_id, enable_lfg=False):
+    def __init__(self, bot_id, token, server_id, enable_lfg=False, debug_mode=False):
         """
         Initialize a ServerBot instance.
 
@@ -27,11 +27,14 @@ class ServerBot:
             token: Discord bot token
             server_id: SCP server ID to monitor
             enable_lfg: Whether this bot has LFG functionality enabled
+            debug_mode: When True, log who would be timed out instead of
+                applying the timeout.
         """
         self.bot_id = bot_id
         self.token = token
         self.server_id = server_id
         self.enable_lfg = enable_lfg
+        self.debug_mode = debug_mode or str(os.getenv("SERVER_STATUS_DEBUG_MODE", "")).lower() in {"1", "true", "yes", "on"}
 
         # Configuration
         self.refresh = 90
@@ -57,7 +60,7 @@ class ServerBot:
 
         # Channel where staff are notified when a member is found holding
         # the flagged role, and other moderation-relevant events.
-        self.staff_report_channel_id = 1419155961033130016  # Replace with your staff/log channel ID.
+        self.staff_report_channel_id = 1435290475971088614  # Replace with your staff/log channel ID.
 
         # Members who have already been alerted on are recorded here so
         # they are never pinged about again, even across restarts or if
@@ -72,13 +75,16 @@ class ServerBot:
         # since posting in the channel is itself the signal being watched
         # for. Set to 0 to disable. The channel's first-ever message is
         # treated as a pinned info message and never triggers an alert.
-        self.watched_message_channel_id = 1522658894529433710  # Set to a channel ID to enable.
+        self.watched_message_channel_id = 782358025663021146  # Set to a channel ID to enable.
 
         # Members who have already been alerted on for posting in the
         # watched channel, tracked separately from the flagged-role alerts
         # above (a member could trigger one, the other, or both).
         self.alerted_message_authors_file = f"alerted_message_authors_{self.bot_id}.json"
         self.alerted_message_author_ids = self._load_id_set(self.alerted_message_authors_file)
+
+        # Duration to timeout a user who posts in the watched channel.
+        self.message_timeout_seconds = 300
 
         # Cache of the watched channel's first (oldest) message ID, looked
         # up lazily the first time a message in that channel is seen.
@@ -310,6 +316,38 @@ class ServerBot:
 
         return None
 
+    async def _timeout_message_author(self, message):
+        """Timeout the author of a watched-channel message for 5 minutes."""
+        if not self.watched_message_channel_id:
+            return
+
+        if message.channel.id != self.watched_message_channel_id:
+            return
+
+        if getattr(message.author, "bot", False):
+            return
+
+        author_name = getattr(message.author, "display_name", None) or getattr(message.author, "name", None) or str(message.author)
+
+        if self.debug_mode:
+            print(
+                f"[{self.bot_id}] DEBUG: would timeout {author_name} for {self.message_timeout_seconds}s "
+                f"(reason: Posted in the alert channel)"
+            )
+            return
+
+        if not hasattr(message.author, "timeout_for"):
+            print(f"[{self.bot_id}] Cannot timeout {author_name}; timeout_for unavailable")
+            return
+
+        try:
+            await message.author.timeout_for(
+                timedelta(seconds=self.message_timeout_seconds),
+                reason="Posted in the alert channel"
+            )
+        except Exception as e:
+            print(f"[{self.bot_id}] Failed to timeout {author_name}: {e}")
+
     async def _alert_staff_of_watched_channel_message(self, message):
         """Notify staff that a member has posted in the watched channel.
 
@@ -344,6 +382,8 @@ class ServerBot:
 
         self.alerted_message_author_ids.add(message.author.id)
         self._save_id_set(self.alerted_message_authors_file, self.alerted_message_author_ids)
+
+        await self._timeout_message_author(message)
 
         await self._report_to_staff(
             f"{message.author.mention} has posted in "
