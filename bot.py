@@ -166,7 +166,7 @@ class ServerBot:
 
         # Time of day (UTC) the daily QOTD task runs and posts a poll, if
         # one is available in the queue.
-        self.qotd_post_hour_utc = 20
+        self.qotd_post_hour_utc = 19
         self.qotd_post_minute_utc = 30
 
         # Persisted QOTD queue -- list of dicts, one per submitted
@@ -543,6 +543,7 @@ class ServerBot:
         """Runs once a day. Picks a pending QOTD -- preferring any flagged
         'Use Today', otherwise the oldest pending suggestion -- and posts
         it. If none are pending, skips silently (just logs)."""
+        print(f"[{self.bot_id}] QOTD daily tick fired at {datetime.utcnow().isoformat()} UTC")
         try:
             pending = [e for e in self.qotd_entries if e["status"] == "pending"]
             if not pending:
@@ -554,9 +555,14 @@ class ServerBot:
             pool.sort(key=lambda e: e["created_at"])
             chosen = pool[0]
 
-            await self._post_qotd_poll(chosen)
+            posted = await self._post_qotd_poll(chosen)
+            print(f"[{self.bot_id}] QOTD daily tick posted question {chosen['id']}: {posted}")
         except Exception as e:
             print(f"[{self.bot_id}] Error in QOTD daily task: {e}")
+        finally:
+            next_run = self.qotd_daily_task.next_iteration if self.qotd_daily_task else None
+            print(f"[{self.bot_id}] Next QOTD run scheduled for "
+                  f"{next_run.isoformat() if next_run else 'unknown'}")
 
     async def _qotd_before_loop(self):
         await self.client.wait_until_ready()
@@ -789,6 +795,10 @@ class ServerBot:
 
                 if self.qotd_daily_task is not None and not self.qotd_daily_task.is_running():
                     self.qotd_daily_task.start()
+                    next_run = self.qotd_daily_task.next_iteration
+                    print(f"[{self.bot_id}] QOTD daily task started -- next run at "
+                          f"{next_run.isoformat() if next_run else 'unknown'} "
+                          f"(target: {self.qotd_post_hour_utc:02d}:{self.qotd_post_minute_utc:02d} UTC)")
 
             # All commands are registered as guild commands (not global),
             # so they show up instantly instead of waiting up to an hour
