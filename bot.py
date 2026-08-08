@@ -90,7 +90,7 @@ class ServerBot:
         self.enable_lfg = enable_lfg
 
         # Configuration
-        self.refresh = 90
+        self.refresh = 60  # Poll scplist.kr v2 players endpoint every 60s
         self.lfg_cooldown_minutes = 60
 
         # LFG Configuration
@@ -880,35 +880,61 @@ class ServerBot:
                 await self._alert_staff_of_flagged_member(after)
 
     async def update_server_status(self):
-        """Update server status and manage LFG messages."""
+        """Update server status and manage LFG messages.
+
+        Uses the scplist.kr v2 players endpoint, which accepts a batch of
+        server IDs and returns only the ones currently online (offline
+        servers are simply omitted from the response array). Polled once
+        every self.refresh (60s) seconds, well under the API's rate limit
+        of 20 requests/60s per client IP.
+        """
         while True:
             try:
-                url = f'https://api.scplist.kr/api/servers/{self.server_id}'
-                resp = requests.get(url)
+                url = 'https://scplist.kr/api/v2/servers/players'
+                resp = requests.get(url, params={'serverIds': [self.server_id]})
+
+                if resp.status_code == 429:
+                    print(f"[{self.bot_id}] scplist.kr API rate limit hit, will retry next cycle.")
+                    await asyncio.sleep(self.refresh)
+                    continue
 
                 if resp.status_code != 200:
                     await asyncio.sleep(self.refresh)
                     continue
 
                 data = resp.json()
-                player_count = data['players']
+                entry = next(
+                    (s for s in data if str(s.get("serverId")) == str(self.server_id)),
+                    None,
+                )
 
-                sl_pc = int(player_count.split('/')[0])
-                max_pc = int(player_count.split('/')[1])
+                if entry is None:
+                    # Server wasn't in the response -- it's offline.
+                    is_offline = True
+                    sl_pc, max_pc = 0, 0
+                    player_count = "Offline"
+                else:
+                    is_offline = False
+                    sl_pc = int(entry["current"])
+                    max_pc = int(entry["max"])
+                    player_count = f"{sl_pc}/{max_pc}"
 
                 self.current_player_count = player_count
                 player_counts[self.bot_id] = player_count
 
                 # Update presence
-                if sl_pc == 0:
+                if is_offline:
+                    status = discord.Status.invisible
+                elif sl_pc == 0:
                     status = discord.Status.idle
                 elif sl_pc >= max_pc:
                     status = discord.Status.dnd
                 else:
                     status = discord.Status.online
 
+                activity_name = "Server Offline" if is_offline else f"Online: {player_count}"
                 await self.client.change_presence(
-                    activity=discord.CustomActivity(name=f"Online: {player_count}"),
+                    activity=discord.CustomActivity(name=activity_name),
                     status=status
                 )
 
