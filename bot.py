@@ -890,7 +890,7 @@ class ServerBot:
         """
         while True:
             try:
-                url = 'https://scplist.kr/api/v2/servers/players'
+                url = 'https://api.scplist.kr/api/v2/servers/players'
                 resp = requests.get(url, params={'serverIds': [self.server_id]})
 
                 if resp.status_code == 429:
@@ -899,6 +899,7 @@ class ServerBot:
                     continue
 
                 if resp.status_code != 200:
+                    print(f"[{self.bot_id}] scplist.kr API returned {resp.status_code}: {resp.text[:200]}")
                     await asyncio.sleep(self.refresh)
                     continue
 
