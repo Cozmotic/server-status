@@ -172,7 +172,7 @@ class ServerBot:
         # Persisted QOTD queue -- list of dicts, one per submitted
         # suggestion, surviving restarts. See _load_qotd_data.
         self.qotd_data_file = f"qotd_data_{self.bot_id}.json"
-        self.qotd_entries = self._load_qotd_data()
+        self.qotd_entries, self.qotd_last_posted_date = self._load_qotd_data()
         self.qotd_daily_task = None
 
         # State
@@ -269,23 +269,54 @@ class ServerBot:
     # ------------------------------------------------------------------
 
     def _load_qotd_data(self):
-        """Load the persisted QOTD queue from disk."""
+        """Load the persisted QOTD queue (and the last-posted-date guard)
+        from disk. Returns (entries, last_posted_date). Transparently
+        migrates the old file format, which was just a bare list of
+        entries with no date guard."""
         try:
             with open(self.qotd_data_file, "r") as f:
-                return json.load(f)
+                data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
-            return []
+            return [], None
         except Exception as e:
             print(f"[{self.bot_id}] Failed to load {self.qotd_data_file}: {e}")
-            return []
+            return [], None
+
+        if isinstance(data, list):
+            # Old format: bare list of entries, no date guard yet.
+            return data, None
+        return data.get("entries", []), data.get("last_posted_date")
 
     def _save_qotd_data(self):
-        """Persist the QOTD queue to disk."""
+        """Persist the QOTD queue and the last-posted-date guard to disk."""
         try:
             with open(self.qotd_data_file, "w") as f:
-                json.dump(self.qotd_entries, f, indent=2)
+                json.dump(
+                    {"entries": self.qotd_entries, "last_posted_date": self.qotd_last_posted_date},
+                    f,
+                    indent=2,
+                )
         except Exception as e:
             print(f"[{self.bot_id}] Failed to save {self.qotd_data_file}: {e}")
+
+    async def _get_qotd_channel(self, channel_id):
+        """Resolve a channel by ID for QOTD purposes. get_channel() only
+        checks discord.py's in-memory cache, which can be briefly empty
+        or stale right after a gateway reconnect even when the channel
+        and its ID are perfectly fine -- that used to be reported to the
+        user as a configuration problem. Fall back to an actual API
+        fetch before giving up."""
+        channel = self.client.get_channel(channel_id)
+        if channel is not None:
+            return channel
+        try:
+            return await self.client.fetch_channel(channel_id)
+        except (discord.NotFound, discord.Forbidden) as e:
+            print(f"[{self.bot_id}] QOTD channel {channel_id} truly unavailable: {e}")
+            return None
+        except Exception as e:
+            print(f"[{self.bot_id}] Error fetching QOTD channel {channel_id}: {e}")
+            return None
 
     def _get_qotd_entry(self, qid):
         """Look up a QOTD entry by its ID."""
@@ -403,12 +434,22 @@ class ServerBot:
                 await interaction.response.send_message("This suggestion is no longer pending.", ephemeral=True)
                 return
             await interaction.response.defer(ephemeral=True)
+            today_str = datetime.utcnow().strftime("%Y-%m-%d")
+            already_posted_today = self.qotd_last_posted_date == today_str
             ok = await self._post_qotd_poll(e)
             if ok:
                 await interaction.followup.send("Posted to the polling channel.", ephemeral=True)
+            elif already_posted_today:
+                await interaction.followup.send(
+                    "A QOTD has already been posted today -- try again tomorrow, or use Remove/Edit "
+                    "on today's poll first if you meant to replace it.",
+                    ephemeral=True,
+                )
             else:
                 await interaction.followup.send(
-                    "Failed to post -- check the QOTD polling channel configuration.", ephemeral=True
+                    "Failed to post -- couldn't reach the QOTD polling channel. This is usually "
+                    "transient (e.g. right after a reconnect); try again in a moment.",
+                    ephemeral=True,
                 )
 
         use_btn = discord.ui.Button(
@@ -440,7 +481,7 @@ class ServerBot:
     async def _refresh_qotd_message(self, entry):
         """Re-render a QOTD entry's message in the queue channel -- embed
         plus buttons (or no buttons, once it's removed/used)."""
-        channel = self.client.get_channel(entry["channel_id"])
+        channel = await self._get_qotd_channel(entry["channel_id"])
         if channel is None:
             return
         try:
@@ -456,9 +497,24 @@ class ServerBot:
         except Exception as e:
             print(f"[{self.bot_id}] Could not edit QOTD message: {e}")
 
+    def _qotd_slot_missed_today(self):
+        """True if today's scheduled QOTD time has already passed and
+        nothing has been posted yet today. Used to decide whether a
+        late submission should go out immediately instead of waiting
+        for tomorrow's tick."""
+        now = datetime.utcnow()
+        today_str = now.strftime("%Y-%m-%d")
+        if self.qotd_last_posted_date == today_str:
+            return False
+        scheduled = dtime(hour=self.qotd_post_hour_utc, minute=self.qotd_post_minute_utc)
+        return now.time() >= scheduled
+
     async def _create_qotd_entry(self, interaction: discord.Interaction, question, answers, multiple):
-        """Create a new pending QOTD entry and post it to the queue channel."""
-        channel = self.client.get_channel(self.qotd_queue_channel_id)
+        """Create a new pending QOTD entry and post it to the queue channel.
+        If today's automatic slot has already passed with nothing posted
+        yet, post this entry immediately instead of leaving it pending
+        until tomorrow."""
+        channel = await self._get_qotd_channel(self.qotd_queue_channel_id)
         if channel is None:
             await interaction.response.send_message("QOTD queue channel not available.", ephemeral=True)
             return
@@ -485,6 +541,17 @@ class ServerBot:
         entry["message_id"] = msg.id
         self.qotd_entries.append(entry)
         self._save_qotd_data()
+
+        if self._qotd_slot_missed_today():
+            posted = await self._post_qotd_poll(entry)
+            if posted:
+                await interaction.response.send_message(
+                    "QOTD suggestion submitted -- today's slot had already passed with nothing "
+                    "posted yet, so it went out immediately.",
+                    ephemeral=True,
+                )
+                return
+
         await interaction.response.send_message("QOTD suggestion submitted.", ephemeral=True)
 
     async def _update_qotd_entry(self, interaction: discord.Interaction, qid, question, answers, multiple):
@@ -505,11 +572,29 @@ class ServerBot:
         """Post a QOTD entry as a native Discord poll in the polling
         channel, attach a public thread named 'QOTD <Mon> <Day> <Year>',
         ping the QOTD role inside it, and mark the entry as used. Returns
-        True on success."""
-        channel = self.client.get_channel(self.qotd_poll_channel_id)
+        True on success.
+
+        Guards against posting twice in one calendar day (whether that's
+        the daily tick racing a manual "Post Now", or a bot restart
+        replaying an entry that was actually already posted): the
+        "posted today" marker is committed to disk *before* anything is
+        sent to Discord, and rolled back if the send fails. That way a
+        crash mid-post can never cause a duplicate -- worst case it just
+        leaves that one entry's own status stale, which is a much
+        smaller, manually-fixable problem than a repost."""
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
+        if self.qotd_last_posted_date == today_str:
+            print(f"[{self.bot_id}] Already posted a QOTD today ({today_str}); skipping.")
+            return False
+
+        channel = await self._get_qotd_channel(self.qotd_poll_channel_id)
         if channel is None:
             print(f"[{self.bot_id}] QOTD poll channel not available.")
             return False
+
+        previous_date = self.qotd_last_posted_date
+        self.qotd_last_posted_date = today_str
+        self._save_qotd_data()
 
         try:
             poll = discord.Poll(
@@ -537,6 +622,11 @@ class ServerBot:
 
         except Exception as e:
             print(f"[{self.bot_id}] Error posting QOTD poll: {e}")
+            # Roll back the date guard -- this attempt never actually
+            # reached Discord, so don't block a legitimate retry later
+            # today.
+            self.qotd_last_posted_date = previous_date
+            self._save_qotd_data()
             return False
 
     async def _qotd_daily_tick(self):
