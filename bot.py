@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timedelta, time as dtime
 import threading
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 from discord.ui import View
 import requests
@@ -17,13 +18,37 @@ lfg_lock = threading.Lock()
 
 
 class QOTDModal(discord.ui.Modal):
-    """Modal used both to submit a brand-new QOTD suggestion and to edit
-    an existing pending one (pre-filled when `existing` is provided)."""
+    """Modal used to submit a brand-new QOTD suggestion, or to edit an
+    existing pending one (pre-filled when `existing` is provided).
 
-    def __init__(self, bot_ref, existing=None):
-        super().__init__(title="Edit QOTD" if existing else "Submit a QOTD")
+    Covers two formats:
+    - "poll" (the original behavior): Question + Answers (2-10 lines) +
+      whether multiple answers can be picked. Posted later as a native
+      Discord poll.
+    - "open": just a Question. Posted later as a plain question with a
+      thread attached underneath, for free-form replies instead of a
+      fixed set of choices.
+
+    Discord modals can't conditionally show/hide fields based on another
+    field's value, so the format has to be decided before the modal is
+    built: from the `qotd_format` argument when creating a new entry, or
+    from the existing entry's own stored format when editing (an entry's
+    format doesn't change after submission).
+    """
+
+    def __init__(self, bot_ref, existing=None, qotd_format="poll"):
+        resolved_format = existing.get("format", "poll") if existing else qotd_format
+        is_open = resolved_format == "open"
+
+        if existing:
+            title = "Edit Open-Ended QOTD" if is_open else "Edit QOTD Poll"
+        else:
+            title = "Submit an Open-Ended QOTD" if is_open else "Submit a QOTD Poll"
+        super().__init__(title=title)
+
         self.bot_ref = bot_ref
         self.existing = existing
+        self.qotd_format = resolved_format
 
         self.question_input = discord.ui.TextInput(
             label="Question",
@@ -32,43 +57,50 @@ class QOTDModal(discord.ui.Modal):
             default=existing["question"] if existing else None,
             required=True,
         )
-        self.answers_input = discord.ui.TextInput(
-            label="Answers (one per line, 2-10)",
-            style=discord.TextStyle.paragraph,
-            default="\n".join(existing["answers"]) if existing else None,
-            required=True,
-        )
-        self.multiple_input = discord.ui.TextInput(
-            label="Allow multiple answers? (yes/no)",
-            style=discord.TextStyle.short,
-            max_length=3,
-            default=("yes" if existing["multiple"] else "no") if existing else "no",
-            required=True,
-        )
-
         self.add_item(self.question_input)
-        self.add_item(self.answers_input)
-        self.add_item(self.multiple_input)
+
+        # Answers/multiple only make sense for the poll format -- an
+        # open-ended question has no fixed choices to configure.
+        if not is_open:
+            self.answers_input = discord.ui.TextInput(
+                label="Answers (one per line, 2-10)",
+                style=discord.TextStyle.paragraph,
+                default="\n".join(existing["answers"]) if existing else None,
+                required=True,
+            )
+            self.multiple_input = discord.ui.TextInput(
+                label="Allow multiple answers? (yes/no)",
+                style=discord.TextStyle.short,
+                max_length=3,
+                default=("yes" if existing["multiple"] else "no") if existing else "no",
+                required=True,
+            )
+            self.add_item(self.answers_input)
+            self.add_item(self.multiple_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        answers = [line.strip() for line in str(self.answers_input.value).split("\n") if line.strip()]
-
-        if len(answers) < 2:
-            await interaction.response.send_message("Please provide at least 2 answers.", ephemeral=True)
-            return
-        if len(answers) > 10:
-            await interaction.response.send_message(
-                "Discord polls support a maximum of 10 answers -- please trim your list.", ephemeral=True
-            )
-            return
-
-        multiple = str(self.multiple_input.value).strip().lower() in ("yes", "y", "true", "1")
         question = str(self.question_input.value).strip()
+
+        if self.qotd_format == "open":
+            answers, multiple = [], False
+        else:
+            answers = [line.strip() for line in str(self.answers_input.value).split("\n") if line.strip()]
+
+            if len(answers) < 2:
+                await interaction.response.send_message("Please provide at least 2 answers.", ephemeral=True)
+                return
+            if len(answers) > 10:
+                await interaction.response.send_message(
+                    "Discord polls support a maximum of 10 answers -- please trim your list.", ephemeral=True
+                )
+                return
+
+            multiple = str(self.multiple_input.value).strip().lower() in ("yes", "y", "true", "1")
 
         if self.existing:
             await self.bot_ref._update_qotd_entry(interaction, self.existing["id"], question, answers, multiple)
         else:
-            await self.bot_ref._create_qotd_entry(interaction, question, answers, multiple)
+            await self.bot_ref._create_qotd_entry(interaction, question, answers, multiple, self.qotd_format)
 
 
 class ServerBot:
@@ -236,11 +268,19 @@ class ServerBot:
                     pass
 
         @self.client.tree.command(name="qotd", description="Submit a Question of the Day suggestion")
-        async def qotd(interaction: discord.Interaction):
+        @app_commands.describe(
+            format="Native poll with fixed answers (default), or an open-ended question for free replies"
+        )
+        @app_commands.choices(format=[
+            app_commands.Choice(name="Poll (fixed answers)", value="poll"),
+            app_commands.Choice(name="Open-ended (free response)", value="open"),
+        ])
+        async def qotd(interaction: discord.Interaction, format: app_commands.Choice[str] = None):
             try:
                 if not await self._check_qotd_manager(interaction):
                     return
-                await interaction.response.send_modal(QOTDModal(self))
+                qotd_format = format.value if format else "poll"
+                await interaction.response.send_modal(QOTDModal(self, qotd_format=qotd_format))
             except Exception as e:
                 print(f"[{self.bot_id}] Error in /qotd command: {e}")
                 try:
@@ -343,8 +383,11 @@ class ServerBot:
 
     def _build_qotd_embed(self, entry):
         """Build the embed shown in the QOTD queue channel for one entry,
-        styled according to its current status (pending / removed / used)."""
-        answers_text = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(entry["answers"])) or "-"
+        styled according to its current status (pending / removed / used).
+        Poll-format entries show Answers and Multiple-Answers fields;
+        open-ended entries skip both, since neither applies, and show a
+        Format field instead so staff can tell the two apart at a glance."""
+        is_open = entry.get("format", "poll") == "open"
         status = entry["status"]
 
         if status == "removed":
@@ -353,14 +396,12 @@ class ServerBot:
                 description=f"~~{entry['question']}~~",
                 color=discord.Color.red(),
             )
-            embed.add_field(name="Answers", value=answers_text, inline=False)
         elif status == "used":
             embed = discord.Embed(
                 title="✅ QOTD (Posted)",
                 description=entry["question"],
                 color=discord.Color.green(),
             )
-            embed.add_field(name="Answers", value=answers_text, inline=False)
         else:
             title = "📋 QOTD Suggestion"
             if entry.get("force_today"):
@@ -370,13 +411,19 @@ class ServerBot:
                 description=entry["question"],
                 color=discord.Color.blurple(),
             )
-            embed.add_field(name="Answers", value=answers_text, inline=False)
 
-        embed.add_field(
-            name="Multiple Answers Allowed",
-            value="Yes" if entry["multiple"] else "No",
-            inline=True,
-        )
+        if is_open:
+            embed.add_field(name="Format", value="💬 Open-Ended", inline=True)
+        else:
+            answers_text = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(entry["answers"])) or "-"
+            embed.add_field(name="Answers", value=answers_text, inline=False)
+            embed.add_field(name="Format", value="📊 Poll", inline=True)
+            embed.add_field(
+                name="Multiple Answers Allowed",
+                value="Yes" if entry["multiple"] else "No",
+                inline=True,
+            )
+
         embed.set_footer(text=f"ID: {entry['id']}")
         embed.add_field(name="Submitted by", value=f"<@{entry['author_id']}>", inline=True)
         return embed
@@ -509,11 +556,16 @@ class ServerBot:
         scheduled = dtime(hour=self.qotd_post_hour_utc, minute=self.qotd_post_minute_utc)
         return now.time() >= scheduled
 
-    async def _create_qotd_entry(self, interaction: discord.Interaction, question, answers, multiple):
+    async def _create_qotd_entry(self, interaction: discord.Interaction, question, answers, multiple, qotd_format="poll"):
         """Create a new pending QOTD entry and post it to the queue channel.
         If today's automatic slot has already passed with nothing posted
         yet, post this entry immediately instead of leaving it pending
-        until tomorrow."""
+        until tomorrow.
+
+        `qotd_format` is "poll" (native Discord poll, the original
+        behavior) or "open" (a plain question posted for free-form thread
+        replies -- `answers`/`multiple` are unused in that case, passed
+        in as [] / False)."""
         channel = await self._get_qotd_channel(self.qotd_queue_channel_id)
         if channel is None:
             await interaction.response.send_message("QOTD queue channel not available.", ephemeral=True)
@@ -524,6 +576,7 @@ class ServerBot:
             "question": question,
             "answers": answers,
             "multiple": multiple,
+            "format": qotd_format,
             "status": "pending",
             "force_today": False,
             "author_id": interaction.user.id,
@@ -569,10 +622,14 @@ class ServerBot:
         await interaction.response.send_message("QOTD suggestion updated.", ephemeral=True)
 
     async def _post_qotd_poll(self, entry):
-        """Post a QOTD entry as a native Discord poll in the polling
-        channel, attach a public thread named 'QOTD <Mon> <Day> <Year>',
-        ping the QOTD role inside it, and mark the entry as used. Returns
-        True on success.
+        """Post a QOTD entry to the polling channel, attach a public
+        thread named 'QOTD <Mon> <Day> <Year>', ping the QOTD role
+        inside it, and mark the entry as used. Returns True on success.
+
+        Poll-format entries are posted as a native Discord poll with
+        fixed answers, same as always. Open-ended entries (format
+        "open") are posted as a plain embed with just the question --
+        there's no poll to vote in, people reply freely in the thread.
 
         Guards against posting twice in one calendar day (whether that's
         the daily tick racing a manual "Post Now", or a bot restart
@@ -597,15 +654,23 @@ class ServerBot:
         self._save_qotd_data()
 
         try:
-            poll = discord.Poll(
-                question=entry["question"],
-                duration=timedelta(hours=self.qotd_poll_duration_hours),
-                multiple=entry["multiple"],
-            )
-            for answer in entry["answers"]:
-                poll.add_answer(text=answer)
+            if entry.get("format", "poll") == "open":
+                embed = discord.Embed(
+                    title="💬 Question of the Day",
+                    description=f"{entry['question']}\n\nReply in the thread below with your answer!",
+                    color=discord.Color.blurple(),
+                )
+                msg = await channel.send(embed=embed)
+            else:
+                poll = discord.Poll(
+                    question=entry["question"],
+                    duration=timedelta(hours=self.qotd_poll_duration_hours),
+                    multiple=entry["multiple"],
+                )
+                for answer in entry["answers"]:
+                    poll.add_answer(text=answer)
 
-            msg = await channel.send(poll=poll)
+                msg = await channel.send(poll=poll)
 
             now = datetime.utcnow()
             thread_name = f"QOTD {now.strftime('%b')} {now.day} {now.year}"
@@ -1065,8 +1130,8 @@ async def run_all_bots():
     """Run all bot instances concurrently."""
     # Define bots: (bot_id, token_env_var, server_id, enable_lfg)
     bots_config = [
-        ("Server 1", "THEATORS_BOT_TOKEN", "95631", True),
-        ("Server 2", "THEATORS_BOT_TOKEN_2", "101529", False),
+        ("Server 1", "THEATORS_BOT_TOKEN", "101529", True),
+        ("Server 2", "THEATORS_BOT_TOKEN_2", "95631", False),
     ]
 
     bots = []
