@@ -267,6 +267,46 @@ class ServerBot:
                 except:
                     pass
 
+        @self.client.tree.command(name="minecraft-lfg")
+        async def minecraft_lfg(interaction: discord.Interaction):
+            global lfg_last_time
+
+            try:
+                await interaction.response.defer(ephemeral=True)
+
+                now = datetime.now()
+                with lfg_lock:
+                    if lfg_last_time:
+                        elapsed = (now - lfg_last_time).total_seconds() / 60
+                        if elapsed < self.lfg_cooldown_minutes:
+                            await interaction.followup.send("Cooldown active.", ephemeral=True)
+                            return
+                    lfg_last_time = now
+
+                channel = self.client.get_channel(self.lfg_channel_id)
+                if channel is None:
+                    await interaction.followup.send("LFG channel not available.", ephemeral=True)
+                    return
+
+                content = f"<@&{self.mc_lfg_role_id}> (Posted by <@{interaction.user.id}>)"
+                msg = await channel.send(content)
+
+                self.lfg_posts[str(interaction.user.id)] = {
+                    "channel_id": channel.id,
+                    "message_id": msg.id,
+                    "type": "minecraft",
+                    "author_id": interaction.user.id
+                }
+
+                await interaction.followup.send("LFG posted.", ephemeral=True)
+
+            except Exception as e:
+                print(f"[{self.bot_id}] Error in /minecraft-lfg command: {e}")
+                try:
+                    await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+                except:
+                    pass
+
         @self.client.tree.command(name="qotd", description="Submit a Question of the Day suggestion")
         @app_commands.describe(
             format="Native poll with fixed answers (default), or an open-ended question for free replies"
